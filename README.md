@@ -1,64 +1,62 @@
 # FreeFlow
 
+![FreeFlow](src/FreeFlow/Assets/banner.png)
+
 Free, local, private voice dictation for Windows — a full [Wispr Flow](https://wisprflow.ai/) replacement that costs **nothing, forever**. No account, no subscription, no word limits, and your voice never leaves this machine.
 
-## How to use it
+## How it works
 
-1. Run `FreeFlow.exe` — a mic icon appears in the system tray.
+1. Run `FreeFlow.exe` — the app window opens and a mic icon lands in the tray.
 2. Put your cursor in any text field, in any app.
-3. **Hold Right Ctrl** and speak. Release — your words appear, cleanly punctuated.
-4. **Quick-tap Right Ctrl** to latch hands-free recording; tap again to stop.
+3. **Hold Right Ctrl** and speak — **words appear while you're still talking.**
+4. Release — FreeFlow re-checks the whole utterance with its accurate model and polishes the text in place (punctuation, capitalization, filler removal).
+5. **Quick-tap** Right Ctrl to latch hands-free; tap again (or click the pill) to stop.
 
-That's the whole workflow. Everything else is seasoning.
+While you talk, the floating pill at the bottom of the screen shows a live equalizer and the words streaming in.
 
-### Spoken commands (while dictating)
+### Spoken commands
 
 | Say | Get |
 |---|---|
-| "new line" | line break |
-| "new paragraph" | blank line |
+| "new line" / "new paragraph" | line break / blank line |
 | "scratch that" (mid-sentence) | wipes what you said before it |
-| "scratch that" (alone) | deletes the last dictation entirely |
+| "scratch that" (alone) | deletes the last dictation |
 
-### Features (Settings via tray icon)
+### The app
 
-- **Auto-edits** — filler words (um, uh…) removed, punctuation and capitalization come from the model itself
-- **Custom dictionary** — "hey gen" → "HeyGen"; teach it names, jargon, brands
-- **Voice shortcuts** — say "my email" alone and it types the full address
-- **Tone matching per app** — casual in Discord/Slack (no trailing period), professional in Outlook, verbatim in terminals
-- **Command mode** — select text, hold the command key, say "make this more concise" (needs a local LLM — install [Ollama](https://ollama.com) and it works with defaults)
-- **Whisper mode** — crank Input gain in Settings → General to dictate quietly
-- **Multilingual** — switch to a Whisper model in Settings → Model for 100+ languages
-- **History** — every dictation logged locally (can be disabled/cleared)
-- **Smart spacing** — consecutive dictations into the same app get joined with a space
+- **Home** — status, hotkey (click to change — press any key to rebind), lifetime stats (words, words today, speaking speed), and a test area
+- **Dictation** — live typing toggle, final-pass mode, tone, auto-edits
+- **Dictionary** — "hey gen" → "HeyGen"; teach it names and jargon
+- **Shortcuts** — say "my email" alone, get the full address typed
+- **App Profiles** — tone matching per app: casual in Discord, professional in Outlook, verbatim in terminals
+- **History** — every dictation, locally; **Model** — model manager; **Settings** — mic, hotkeys, autostart, AI endpoint
 
-## Tech
+Settings apply instantly — no save button.
 
-| Piece | What |
-|---|---|
-| Speech recognition | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) running **NVIDIA Parakeet TDT 0.6B v2** (int8, CPU) |
-| Accuracy | Beats Whisper large-v3 on English benchmarks; punctuation + caps built in |
-| Speed | ~0.13× real-time on an i7-4790 (3.4s of speech → 431ms) |
-| App | C# / .NET 8 WinForms tray app, ~3,000 lines |
-| Audio | NAudio, 16 kHz mono, warm-mic ring buffer so your first syllable is never clipped |
-| Injection | Clipboard paste (with clipboard restore) or per-app character typing |
+## Engine architecture (all local, all CPU)
 
-Models live in `%APPDATA%\FreeFlow\models`, config in `%APPDATA%\FreeFlow\config.json`.
+| Stage | Model | Job |
+|---|---|---|
+| Live words | Streaming Zipformer transducer (int8, 71 MB) | partial transcripts ~every 100 ms while you speak |
+| Punctuation | CT-Transformer online punct (int8, 7 MB) | caps + punctuation for live text |
+| Final polish | **NVIDIA Parakeet TDT 0.6B v2** (int8, 652 MB) | re-transcribes the utterance on release; beats Whisper large-v3 on English |
+| Multilingual | Whisper small/base (optional) | 100+ languages |
 
-## Build from source
+Measured on the i7-4790: streaming partials arrive while audio is still being fed (first words < 1 s in), Parakeet polishes 3.4 s of speech in ~500 ms.
+
+Command mode (select text, hold command key, say "make this more concise") works with any OpenAI-compatible endpoint — install [Ollama](https://ollama.com) for free local AI.
+
+## Build & verify
 
 ```powershell
 cd src\FreeFlow
-dotnet build -c Release
-# exe lands in bin\Release\net8.0-windows\FreeFlow.exe
+dotnet build -c Release          # exe → bin\Release\net8.0-windows\FreeFlow.exe
+
+FreeFlow.exe --selftest          # 33 checks: formatter, resamplers, TTS→STT, streaming partials, punctuation
+FreeFlow.exe --injecttest        # live text-injection proof
+FreeFlow.exe --pillpreview       # animated demo of the overlay pill
+FreeFlow.exe --transcribe x.wav  # transcribe any wav
+FreeFlow.exe --makeassets <dir>  # regenerate logo/icon/banner
 ```
 
-## Verification
-
-```powershell
-FreeFlow.exe --selftest      # formatter suite + real TTS→STT transcription check
-FreeFlow.exe --injecttest    # live text-injection check (needs unlocked desktop)
-FreeFlow.exe --transcribe x.wav  # transcribe any wav file
-```
-
-Report written to `%APPDATA%\FreeFlow\selftest.txt`.
+Models live in `%APPDATA%\FreeFlow\models`, config/history/stats in `%APPDATA%\FreeFlow`.

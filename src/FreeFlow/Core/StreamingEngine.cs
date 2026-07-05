@@ -30,9 +30,12 @@ public sealed class StreamingEngine : IDisposable
 
     public void Load(AppConfig cfg)
     {
+        // stop any active session first — the decode thread must be fully joined
+        // before the recognizer underneath it is disposed
+        AbortSession();
+
         lock (_lock)
         {
-            AbortSessionLocked();
             _rec?.Dispose();
             _rec = null;
             _punct?.Dispose();
@@ -164,12 +167,6 @@ public sealed class StreamingEngine : IDisposable
         }
         worker?.Join(3000);
         lock (_lock) { CleanupSessionLocked(); }
-    }
-
-    private void AbortSessionLocked()
-    {
-        _queue?.CompleteAdding();
-        CleanupSessionLocked();
     }
 
     private void CleanupSessionLocked()

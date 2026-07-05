@@ -266,7 +266,7 @@ public sealed class MainForm : Form
     {
         var page = new Panel();
 
-        var hero = Card(0, 0, 720, 130);
+        var hero = Card(0, 0, 720, 148);
         _statusBig = new Label
         {
             Text = "Loading…",
@@ -288,7 +288,7 @@ public sealed class MainForm : Form
             Text = "…",
             Font = new Font("Consolas", 11f, FontStyle.Bold),
             Size = new Size(150, 34),
-            Location = new Point(22, 84),
+            Location = new Point(22, 102),
             FlatStyle = FlatStyle.Flat,
             BackColor = Theme.Field,
             ForeColor = Theme.Accent,
@@ -300,7 +300,7 @@ public sealed class MainForm : Form
         {
             Text = "← hold to dictate, tap to latch. Click to change.",
             ForeColor = Theme.SubText,
-            Location = new Point(184, 92),
+            Location = new Point(184, 110),
             AutoSize = true,
         };
         hero.Controls.Add(_statusBig);
@@ -314,7 +314,7 @@ public sealed class MainForm : Form
         var statValues = new Label[4];
         for (int i = 0; i < 4; i++)
         {
-            var card = Card(i * 184, 146, 168, 84);
+            var card = Card(i * 184, 164, 168, 84);
             statValues[i] = new Label
             {
                 Text = "—",
@@ -339,13 +339,13 @@ public sealed class MainForm : Form
         {
             Text = "Try it — click below, hold the hotkey, and talk:",
             ForeColor = Theme.SubText,
-            Location = new Point(2, 248),
+            Location = new Point(2, 266),
             AutoSize = true,
         });
         var tryBox = new TextBox
         {
             Multiline = true,
-            Location = new Point(0, 272),
+            Location = new Point(0, 290),
             Size = new Size(720, 150),
             Font = new Font("Segoe UI", 11f),
             BackColor = Theme.Field,
