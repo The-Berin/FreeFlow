@@ -106,8 +106,9 @@ public sealed class TrayContext : ApplicationContext
         SetTray(TrayIcons.Loading, "FreeFlow — loading models…");
         Task.Run(async () =>
         {
-            // make sure the small live-mode models exist (streaming 72 MB + punct 7 MB)
-            foreach (var id in new[] { ModelRegistry.StreamingModelId, ModelRegistry.PunctModelId })
+            // make sure everything needed exists: live models (72 MB + 7 MB) and the
+            // selected accurate model (652 MB on first ever run) — fresh installs just work
+            foreach (var id in new[] { ModelRegistry.StreamingModelId, ModelRegistry.PunctModelId, _cfg.ModelId })
             {
                 var m = ModelRegistry.Get(id);
                 if (!m.IsDownloaded())
