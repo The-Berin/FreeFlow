@@ -2,7 +2,7 @@ using SherpaOnnx;
 
 namespace FreeFlow.Core;
 
-public enum ModelKind { NemoTransducer, Whisper }
+public enum ModelKind { NemoTransducer, Whisper, OnlineTransducer, OnlinePunctuation }
 
 public class ModelFile
 {
@@ -34,6 +34,13 @@ public class ModelInfo
 
 public static class ModelRegistry
 {
+    public const string StreamingModelId = "streaming-zipformer-en-int8";
+    public const string PunctModelId = "online-punct-en";
+
+    private const string ZipformerBase =
+        "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26/resolve/main";
+    private const string PunctBase =
+        "https://huggingface.co/brady-pplx/sherpa-onnx-online-punct-en-2024-08-06/resolve/main";
     private const string ParakeetBase =
         "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/main";
     private const string WhisperSmallBase =
@@ -43,6 +50,32 @@ public static class ModelRegistry
 
     public static readonly ModelInfo[] All =
     {
+        new()
+        {
+            Id = StreamingModelId,
+            DisplayName = "Streaming Zipformer (English — live word-by-word)",
+            Kind = ModelKind.OnlineTransducer,
+            LanguageNote = "Powers live transcription while you speak. English. Downloaded automatically.",
+            Files = new[]
+            {
+                new ModelFile("encoder.int8.onnx", $"{ZipformerBase}/encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx", 71_083_163),
+                new ModelFile("decoder.int8.onnx", $"{ZipformerBase}/decoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx", 1_307_236),
+                new ModelFile("joiner.int8.onnx", $"{ZipformerBase}/joiner-epoch-99-avg-1-chunk-16-left-128.int8.onnx", 259_335),
+                new ModelFile("tokens.txt", $"{ZipformerBase}/tokens.txt", 5_048),
+            },
+        },
+        new()
+        {
+            Id = PunctModelId,
+            DisplayName = "Online punctuation (English — for live mode)",
+            Kind = ModelKind.OnlinePunctuation,
+            LanguageNote = "Adds punctuation + capitalization to live transcription. Downloaded automatically.",
+            Files = new[]
+            {
+                new ModelFile("model.int8.onnx", $"{PunctBase}/model.int8.onnx", 7_490_500),
+                new ModelFile("bpe.vocab", $"{PunctBase}/bpe.vocab", 149_430),
+            },
+        },
         new()
         {
             Id = "parakeet-tdt-0.6b-v2-int8",
@@ -86,7 +119,12 @@ public static class ModelRegistry
     };
 
     public static ModelInfo Get(string id)
-        => All.FirstOrDefault(m => m.Id == id) ?? All[0];
+        => All.FirstOrDefault(m => m.Id == id)
+           ?? All.First(m => m.Id == "parakeet-tdt-0.6b-v2-int8");
+
+    /// <summary>Models the user can pick as the main dictation model (not the internal streaming/punct helpers).</summary>
+    public static ModelInfo[] Selectable
+        => All.Where(m => m.Kind is ModelKind.NemoTransducer or ModelKind.Whisper).ToArray();
 }
 
 public static class ModelDownloader

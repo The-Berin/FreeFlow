@@ -45,6 +45,16 @@ public class AppConfig
     /// <summary>Language hint for multilingual (Whisper) models. Empty = auto-detect.</summary>
     public string Language { get; set; } = "en";
 
+    // Live streaming dictation
+    /// <summary>Type words into the target app while you're still speaking.</summary>
+    public bool LiveTyping { get; set; } = true;
+    /// <summary>What happens when you release the hotkey in live mode:
+    /// "parakeet" = re-transcribe with the accurate model and replace the live text (best),
+    /// "punct" = just punctuate the live text (instant), "off" = leave the live text as typed.</summary>
+    public string FinalPass { get; set; } = "parakeet";
+    /// <summary>Show the floating pill with the live equalizer + transcript.</summary>
+    public bool ShowPill { get; set; } = true;
+
     // Formatting
     public bool RemoveFillers { get; set; } = true;
     public List<string> FillerWords { get; set; } =

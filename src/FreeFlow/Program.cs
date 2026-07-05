@@ -19,6 +19,13 @@ internal static class Program
         }
         if (args.Length >= 2 && args[0] == "--transcribe")
             return SelfTest.TranscribeFile(args[1]);
+        if (args.Length >= 2 && args[0] == "--makeassets")
+            return AssetGenerator.Generate(args[1]);
+        if (args.Contains("--pillpreview"))
+        {
+            ApplicationConfiguration.Initialize();
+            return SelfTest.PillPreview();
+        }
 
         using var mutex = new Mutex(initiallyOwned: true, "FreeFlow_SingleInstance", out bool isFirst);
         if (!isFirst)
@@ -42,8 +49,8 @@ internal static class Program
         var cfg = AppConfig.Load();
         cfg.Save(); // materialize defaults on first run
 
-        Logger.Log($"FreeFlow starting — model {cfg.ModelId}, hotkey {cfg.HotkeyName}");
-        Application.Run(new TrayContext(cfg));
+        Logger.Log($"FreeFlow starting — model {cfg.ModelId}, hotkey {cfg.HotkeyName}, live={cfg.LiveTyping}");
+        Application.Run(new TrayContext(cfg, showMainWindow: !args.Contains("--minimized")));
         return 0;
     }
 }

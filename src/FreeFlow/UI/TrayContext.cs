@@ -1,29 +1,35 @@
 using System.Diagnostics;
 using FreeFlow.Core;
-using Microsoft.Win32;
 
 namespace FreeFlow.UI;
 
 /// <summary>
-/// The conductor: owns the tray icon, wires hotkey → recorder → recognizer →
-/// formatter → injector, and hosts the settings/history windows.
+/// The conductor: owns the tray icon and both recognition engines, and wires
+/// hotkey → recorder → streaming words → live typing → final polish → injection.
 /// </summary>
 public sealed class TrayContext : ApplicationContext
 {
     private enum FlowState { Idle, Recording, RecordingLatched, Processing }
 
     private AppConfig _cfg;
-    private readonly SttEngine _engine = new();
+    private readonly SttEngine _engine = new();          // accurate batch model (Parakeet/Whisper)
+    private readonly StreamingEngine _streaming = new(); // live word-by-word model
     private readonly AudioRecorder _recorder = new();
     private readonly KeyboardHook _hook = new();
     private readonly OverlayForm _overlay = new();
+    private readonly LiveTyper _liveTyper = new();
     private readonly NotifyIcon _tray;
 
     private FlowState _state = FlowState.Idle;
     private bool _enabled = true;
-    private bool _commandCapture;         // current recording is a command-mode instruction
+    private bool _commandCapture;
     private DateTime _keyDownAt;
     private (string ProcessName, string Title) _targetApp;
+    private string _livePrefix = "";
+
+    // partial-result coalescing onto the UI thread
+    private volatile string _pendingPartial = "";
+    private int _partialScheduled;
 
     // smart spacing state
     private int _lastInjectedLength;
@@ -31,28 +37,40 @@ public sealed class TrayContext : ApplicationContext
     private DateTime _lastInjectedAt = DateTime.MinValue;
     private volatile bool _typedSinceInjection = true;
 
-    private SettingsForm? _settingsForm;
-    private HistoryForm? _historyForm;
+    private MainForm? _mainForm;
 
-    public TrayContext(AppConfig cfg)
+    public AppConfig Config => _cfg;
+    public SttEngine Engine => _engine;
+    public StreamingEngine Streaming => _streaming;
+    public AudioRecorder Recorder => _recorder;
+    public KeyboardHook Hook => _hook;
+    public bool Enabled { get => _enabled; set => SetEnabled(value); }
+
+    public event Action? EngineStateChanged;
+
+    public TrayContext(AppConfig cfg, bool showMainWindow)
     {
         _cfg = cfg;
 
         _tray = new NotifyIcon
         {
-            Icon = TrayIcons.Idle,
-            Text = "FreeFlow — loading model…",
+            Icon = TrayIcons.Loading,
+            Text = "FreeFlow — loading models…",
             Visible = true,
         };
         _tray.ContextMenuStrip = BuildMenu();
-        _tray.DoubleClick += (_, _) => OpenSettings();
+        _tray.DoubleClick += (_, _) => OpenMain();
 
-        // force handle creation so BeginInvoke works from any thread
-        _ = _overlay.Handle;
+        _ = _overlay.Handle; // create the handle so BeginInvoke works from any thread
+        _overlay.StopRequested += () => _overlay.BeginInvoke(OnPillClicked);
 
-        _recorder.Level += rms => _overlay.PushLevel(rms);
+        _recorder.Level += rms => { }; // reserved for the app window mic meter
+        _recorder.Spectrum += bands => _overlay.PushSpectrum(bands);
+        _recorder.Samples16k += chunk => _streaming.Feed(chunk);
         _recorder.Error += msg => _overlay.SetState(OverlayState.Error, msg);
         _recorder.Configure(_cfg);
+
+        _streaming.Partial += OnPartialFromDecoder;
 
         _hook.HotkeyDown += OnHotkeyDown;
         _hook.HotkeyUp += OnHotkeyUp;
@@ -70,44 +88,55 @@ public sealed class TrayContext : ApplicationContext
                 "FreeFlow", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
 
-        LoadEngineInBackground(firstLoad: true);
+        LoadEnginesInBackground(firstLoad: true);
 
-        if (!_cfg.FirstRunDone)
+        if (showMainWindow || !_cfg.FirstRunDone)
         {
             _cfg.FirstRunDone = true;
             _cfg.Save();
-            _tray.ShowBalloonTip(6000, "FreeFlow is running",
-                $"Hold {_cfg.HotkeyName} and speak — release to insert text. Double-click the tray icon for settings.",
-                ToolTipIcon.Info);
+            OpenMain();
         }
     }
 
-    private void LoadEngineInBackground(bool firstLoad)
+    private void LoadEnginesInBackground(bool firstLoad)
     {
-        SetTray(TrayIcons.Loading, "FreeFlow — loading model…");
-        Task.Run(() =>
+        SetTray(TrayIcons.Loading, "FreeFlow — loading models…");
+        Task.Run(async () =>
         {
+            // make sure the small live-mode models exist (streaming 72 MB + punct 7 MB)
+            foreach (var id in new[] { ModelRegistry.StreamingModelId, ModelRegistry.PunctModelId })
+            {
+                var m = ModelRegistry.Get(id);
+                if (!m.IsDownloaded())
+                {
+                    try
+                    {
+                        SetTraySafe(TrayIcons.Loading, $"FreeFlow — downloading {m.Id}…");
+                        await ModelDownloader.DownloadAsync(m, null, CancellationToken.None);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log(ex, $"auto-downloading {m.Id}");
+                    }
+                }
+            }
+
+            _streaming.Load(_cfg);
             _engine.Load(_cfg);
+
             _overlay.BeginInvoke(() =>
             {
-                if (_engine.IsLoaded)
+                EngineStateChanged?.Invoke();
+                if (_engine.IsLoaded || _streaming.IsLoaded)
                 {
                     SetTray(_enabled ? TrayIcons.Idle : TrayIcons.Disabled,
-                        $"FreeFlow — ready (hold {_cfg.HotkeyName} to dictate)");
+                        $"FreeFlow — hold {_cfg.HotkeyName} to dictate");
                 }
                 else
                 {
-                    SetTray(TrayIcons.Disabled, "FreeFlow — model not loaded");
+                    SetTray(TrayIcons.Disabled, "FreeFlow — no model loaded");
                     if (firstLoad)
-                    {
-                        _tray.ShowBalloonTip(8000, "FreeFlow needs a model",
-                            _engine.LoadError ?? "Open Settings → Model to download one.", ToolTipIcon.Warning);
-                        OpenSettings(selectModelPage: true);
-                    }
-                    else
-                    {
-                        MessageBox.Show(_engine.LoadError, "FreeFlow", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    }
+                        OpenMain();
                 }
             });
         });
@@ -119,7 +148,7 @@ public sealed class TrayContext : ApplicationContext
     {
         _overlay.BeginInvoke(() =>
         {
-            if (!_enabled || !_engine.IsLoaded) return;
+            if (!_enabled || (!_engine.IsLoaded && !_streaming.IsLoaded)) return;
 
             switch (_state)
             {
@@ -176,17 +205,56 @@ public sealed class TrayContext : ApplicationContext
         });
     }
 
+    private void OnPillClicked()
+    {
+        if (_state is FlowState.Recording or FlowState.RecordingLatched)
+            StopAndProcess();
+    }
+
     #endregion
+
+    #region recording pipeline
 
     private void StartRecording(bool command)
     {
         _commandCapture = command;
         _targetApp = ForegroundApp.Get();
+
+        _livePrefix = _cfg.SmartSpacing &&
+                      !_typedSinceInjection &&
+                      _lastInjectedApp == _targetApp.ProcessName &&
+                      (DateTime.UtcNow - _lastInjectedAt) < TimeSpan.FromSeconds(90) &&
+                      _lastInjectedLength > 0
+            ? " " : "";
+
+        if (_streaming.IsLoaded)
+            _streaming.StartSession();
+        if (!command && _cfg.LiveTyping && _streaming.IsLoaded)
+            _liveTyper.Begin();
+
         _recorder.StartCapture();
         _state = FlowState.Recording;
-        _overlay.SetState(OverlayState.Listening);
+        if (_cfg.ShowPill)
+            _overlay.SetState(OverlayState.Listening);
         SetTray(TrayIcons.Recording, "FreeFlow — listening");
         SoundFx.RecordStart(_cfg);
+    }
+
+    private void OnPartialFromDecoder(string text)
+    {
+        _overlay.SetLiveText(text);
+        if (!_liveTyper.Active) return;
+
+        _pendingPartial = text;
+        if (Interlocked.CompareExchange(ref _partialScheduled, 1, 0) == 0)
+        {
+            _overlay.BeginInvoke(() =>
+            {
+                Interlocked.Exchange(ref _partialScheduled, 0);
+                if (_liveTyper.Active)
+                    _liveTyper.OnPartial(_pendingPartial, _cfg, _livePrefix);
+            });
+        }
     }
 
     private void StopAndProcess()
@@ -194,131 +262,163 @@ public sealed class TrayContext : ApplicationContext
         var samples = _recorder.StopCapture();
         bool isCommand = _commandCapture;
         _commandCapture = false;
+        bool wasLive = _liveTyper.Active;
+        string livePrefix = _livePrefix;
         _state = FlowState.Processing;
         SoundFx.RecordStop(_cfg);
-
-        // too short to be intentional speech
-        if (samples.Length < 16000 * 0.35)
-        {
-            _state = FlowState.Idle;
-            _overlay.SetState(OverlayState.Hidden);
-            SetTray(TrayIcons.Idle, "FreeFlow — ready");
-            return;
-        }
-
         _overlay.SetState(OverlayState.Processing);
         SetTray(TrayIcons.Processing, "FreeFlow — processing");
 
         Task.Run(async () =>
         {
-            string raw;
-            var sw = Stopwatch.StartNew();
-            try
-            {
-                raw = _engine.Transcribe(samples);
-            }
-            catch (Exception ex)
-            {
-                Logger.Log(ex, "transcription");
-                Finish(() => _overlay.SetState(OverlayState.Error, "Transcription failed — see log"));
-                return;
-            }
-            Logger.Log($"transcribed {samples.Length / 16000.0:0.0}s audio in {sw.ElapsedMilliseconds}ms: \"{Truncate(raw, 80)}\"");
+            // drain the live decoder first — its final text is our fallback
+            string rawStream = _streaming.FinishSession();
+            double audioSec = samples.Length / 16000.0;
 
-            if (string.IsNullOrWhiteSpace(raw))
+            if (audioSec < 0.35)
             {
                 Finish(() =>
                 {
+                    if (wasLive) _liveTyper.Erase();
+                    _overlay.SetState(OverlayState.Hidden);
+                });
+                return;
+            }
+
+            if (isCommand)
+            {
+                await RunCommandMode(samples, rawStream);
+                return;
+            }
+
+            var profile = _cfg.ProfileFor(_targetApp.ProcessName);
+            string tone = profile?.Tone is { Length: > 0 } and not "Default" ? profile!.Tone : _cfg.DefaultTone;
+            string injectMode = profile?.InjectMode ?? "Paste";
+
+            // produce the best final text we can
+            var sw = Stopwatch.StartNew();
+            string finalRaw = "";
+            if (_cfg.FinalPass == "parakeet" || !wasLive)
+            {
+                try
+                {
+                    if (_engine.IsLoaded)
+                        finalRaw = _engine.Transcribe(samples);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log(ex, "final-pass transcription");
+                }
+            }
+            if (string.IsNullOrWhiteSpace(finalRaw))
+                finalRaw = _cfg.FinalPass == "off" ? rawStream : _streaming.Punctuate(rawStream);
+            sw.Stop();
+            Logger.Log($"utterance {audioSec:0.0}s → final in {sw.ElapsedMilliseconds}ms: \"{Truncate(finalRaw, 80)}\"");
+
+            if (string.IsNullOrWhiteSpace(finalRaw))
+            {
+                Finish(() =>
+                {
+                    if (wasLive) _liveTyper.Erase();
                     SoundFx.ErrorTone(_cfg);
                     _overlay.SetState(OverlayState.Error, "Didn't catch that");
                 });
                 return;
             }
 
-            if (isCommand)
-                await RunCommandMode(raw);
-            else
-                await RunDictation(raw);
-        });
-    }
+            var result = TextFormatter.Format(finalRaw, _cfg, tone);
+            string text = result.Text;
 
-    private async Task RunDictation(string raw)
-    {
-        var profile = _cfg.ProfileFor(_targetApp.ProcessName);
-        string tone = profile?.Tone is { Length: > 0 } and not "Default" ? profile!.Tone : _cfg.DefaultTone;
-        string injectMode = profile?.InjectMode ?? "Paste";
-
-        var result = TextFormatter.Format(raw, _cfg, tone);
-        string text = result.Text;
-
-        if (_cfg.AiPolish && _cfg.AiEnabled && !result.DeleteLast && text.Length > 0 && tone != "Verbatim")
-        {
-            try
+            if (_cfg.AiPolish && _cfg.AiEnabled && !result.DeleteLast && text.Length > 0 && tone != "Verbatim")
             {
-                var polished = await AiProvider.PolishAsync(_cfg, text);
-                if (!string.IsNullOrWhiteSpace(polished))
-                    text = polished;
-            }
-            catch (Exception ex)
-            {
-                Logger.Log(ex, "AI polish (falling back to local formatting)");
-            }
-        }
-
-        Finish(() =>
-        {
-            if (result.DeleteLast)
-            {
-                if (_lastInjectedLength > 0)
+                try
                 {
-                    TextInjector.SendBackspaces(_lastInjectedLength);
-                    _lastInjectedLength = 0;
-                    _overlay.SetState(OverlayState.Success, "deleted");
+                    var polished = await AiProvider.PolishAsync(_cfg, text);
+                    if (!string.IsNullOrWhiteSpace(polished))
+                        text = polished;
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log(ex, "AI polish (using local formatting)");
+                }
+            }
+
+            Finish(() =>
+            {
+                if (result.DeleteLast)
+                {
+                    if (wasLive) _liveTyper.Erase();
+                    if (_lastInjectedLength > 0)
+                    {
+                        TextInjector.SendBackspaces(_lastInjectedLength);
+                        _lastInjectedLength = 0;
+                        _overlay.SetState(OverlayState.Success, "deleted");
+                    }
+                    else
+                    {
+                        _overlay.SetState(OverlayState.Error, "Nothing to scratch");
+                    }
+                    return;
+                }
+
+                if (text.Length == 0)
+                {
+                    if (wasLive) _liveTyper.Erase();
+                    _overlay.SetState(OverlayState.Hidden);
+                    return;
+                }
+
+                string finalWithPrefix = livePrefix.Length > 0 && text[0] != '\n' && !char.IsPunctuation(text[0])
+                    ? livePrefix + text
+                    : text;
+
+                if (wasLive)
+                {
+                    _liveTyper.Finalize(finalWithPrefix, injectMode);
                 }
                 else
                 {
-                    _overlay.SetState(OverlayState.Error, "Nothing to scratch");
+                    TextInjector.Inject(finalWithPrefix, injectMode);
                 }
-                return;
-            }
 
-            if (text.Length == 0)
-            {
-                _overlay.SetState(OverlayState.Hidden);
-                return;
-            }
+                _lastInjectedLength = finalWithPrefix.Length;
+                _lastInjectedApp = _targetApp.ProcessName;
+                _lastInjectedAt = DateTime.UtcNow;
+                _typedSinceInjection = false;
 
-            // smart spacing: dictating again into the same app without typing → add a space
-            if (_cfg.SmartSpacing &&
-                !_typedSinceInjection &&
-                _lastInjectedApp == _targetApp.ProcessName &&
-                (DateTime.UtcNow - _lastInjectedAt) < TimeSpan.FromSeconds(90) &&
-                _lastInjectedLength > 0 &&
-                text[0] != '\n' && !char.IsPunctuation(text[0]))
-            {
-                text = " " + text;
-            }
+                int words = text.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length;
+                StatsStore.RecordDictation(words, audioSec, sw.ElapsedMilliseconds);
+                HistoryStore.Append(_cfg, new HistoryEntry
+                {
+                    Ts = DateTime.Now,
+                    App = _targetApp.ProcessName,
+                    Raw = finalRaw,
+                    Text = text,
+                });
 
-            TextInjector.Inject(text, injectMode);
-            _lastInjectedLength = text.Length;
-            _lastInjectedApp = _targetApp.ProcessName;
-            _lastInjectedAt = DateTime.UtcNow;
-            _typedSinceInjection = false;
-
-            HistoryStore.Append(_cfg, new HistoryEntry
-            {
-                Ts = DateTime.Now,
-                App = _targetApp.ProcessName,
-                Raw = raw,
-                Text = text,
+                _overlay.SetState(OverlayState.Success);
             });
-
-            _overlay.SetState(OverlayState.Success);
         });
     }
 
-    private async Task RunCommandMode(string instruction)
+    private async Task RunCommandMode(float[] samples, string rawStream)
     {
+        string instruction = rawStream;
+        try
+        {
+            if (_engine.IsLoaded)
+                instruction = _engine.Transcribe(samples);
+        }
+        catch (Exception ex)
+        {
+            Logger.Log(ex, "command instruction transcription");
+        }
+        if (string.IsNullOrWhiteSpace(instruction))
+        {
+            Finish(() => _overlay.SetState(OverlayState.Error, "Didn't catch the command"));
+            return;
+        }
+
         string? selection = null;
         var done = new SemaphoreSlim(0);
         _overlay.BeginInvoke(() =>
@@ -339,7 +439,6 @@ public sealed class TrayContext : ApplicationContext
         }
 
         string? rewritten = null;
-        string? error = null;
         try
         {
             rewritten = await AiProvider.RewriteAsync(_cfg, instruction, selection!);
@@ -347,7 +446,6 @@ public sealed class TrayContext : ApplicationContext
         catch (Exception ex)
         {
             Logger.Log(ex, "command mode rewrite");
-            error = ex.Message;
         }
 
         Finish(() =>
@@ -355,10 +453,10 @@ public sealed class TrayContext : ApplicationContext
             if (string.IsNullOrWhiteSpace(rewritten))
             {
                 SoundFx.ErrorTone(_cfg);
-                _overlay.SetState(OverlayState.Error, error != null ? "AI error — see log" : "AI returned nothing");
+                _overlay.SetState(OverlayState.Error, "AI rewrite failed — see log");
                 return;
             }
-            TextInjector.PasteText(rewritten); // replaces the still-highlighted selection
+            TextInjector.PasteText(rewritten);
             HistoryStore.Append(_cfg, new HistoryEntry
             {
                 Ts = DateTime.Now,
@@ -370,7 +468,6 @@ public sealed class TrayContext : ApplicationContext
         });
     }
 
-    /// <summary>Marshal a completion action onto the UI thread and reset state.</summary>
     private void Finish(Action uiAction)
     {
         _overlay.BeginInvoke(() =>
@@ -381,70 +478,52 @@ public sealed class TrayContext : ApplicationContext
         });
     }
 
-    #region tray & windows
+    #endregion
+
+    #region tray, windows, config
 
     private ContextMenuStrip BuildMenu()
     {
         var menu = new ContextMenuStrip();
 
+        var openItem = new ToolStripMenuItem("Open FreeFlow") { Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
+        openItem.Click += (_, _) => OpenMain();
+
         var enabledItem = new ToolStripMenuItem("Enabled") { Checked = true, CheckOnClick = true };
-        enabledItem.CheckedChanged += (_, _) =>
-        {
-            _enabled = enabledItem.Checked;
-            SetTray(_enabled ? TrayIcons.Idle : TrayIcons.Disabled,
-                _enabled ? "FreeFlow — ready" : "FreeFlow — disabled");
-        };
-
-        var settingsItem = new ToolStripMenuItem("Settings…");
-        settingsItem.Click += (_, _) => OpenSettings();
-
-        var historyItem = new ToolStripMenuItem("History…");
-        historyItem.Click += (_, _) => OpenHistory();
-
-        var logItem = new ToolStripMenuItem("Open log");
-        logItem.Click += (_, _) =>
-        {
-            if (File.Exists(Paths.LogPath))
-                Process.Start(new ProcessStartInfo(Paths.LogPath) { UseShellExecute = true });
-        };
+        enabledItem.CheckedChanged += (_, _) => SetEnabled(enabledItem.Checked);
 
         var exitItem = new ToolStripMenuItem("Exit");
         exitItem.Click += (_, _) => ExitApp();
 
+        menu.Items.Add(openItem);
         menu.Items.Add(enabledItem);
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(settingsItem);
-        menu.Items.Add(historyItem);
-        menu.Items.Add(logItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(exitItem);
         return menu;
     }
 
-    private void OpenSettings(bool selectModelPage = false)
+    private void SetEnabled(bool value)
     {
-        if (_settingsForm is { IsDisposed: false })
-        {
-            _settingsForm.Activate();
-            return;
-        }
-        _settingsForm = new SettingsForm(_cfg.Clone(), ApplyNewConfig);
-        if (selectModelPage) _settingsForm.SelectModelPage();
-        _settingsForm.Show();
+        _enabled = value;
+        SetTray(_enabled ? TrayIcons.Idle : TrayIcons.Disabled,
+            _enabled ? "FreeFlow — ready" : "FreeFlow — disabled");
+        EngineStateChanged?.Invoke();
     }
 
-    private void OpenHistory()
+    public void OpenMain()
     {
-        if (_historyForm is { IsDisposed: false })
+        if (_mainForm is { IsDisposed: false })
         {
-            _historyForm.Activate();
+            _mainForm.Show();
+            _mainForm.WindowState = FormWindowState.Normal;
+            _mainForm.Activate();
             return;
         }
-        _historyForm = new HistoryForm();
-        _historyForm.Show();
+        _mainForm = new MainForm(this);
+        _mainForm.Show();
     }
 
-    private void ApplyNewConfig(AppConfig fresh)
+    public void ApplyNewConfig(AppConfig fresh)
     {
         bool modelChanged = fresh.ModelId != _cfg.ModelId
                             || fresh.NumThreads != _cfg.NumThreads
@@ -466,8 +545,10 @@ public sealed class TrayContext : ApplicationContext
         }
         if (audioChanged)
             _recorder.Configure(_cfg);
-        if (modelChanged || !_engine.IsLoaded)
-            LoadEngineInBackground(firstLoad: false);
+        if (modelChanged || !_engine.IsLoaded || !_streaming.IsLoaded)
+            LoadEnginesInBackground(firstLoad: false);
+
+        EngineStateChanged?.Invoke();
     }
 
     private void SetTray(Icon icon, string text)
@@ -476,11 +557,20 @@ public sealed class TrayContext : ApplicationContext
         _tray.Text = text.Length > 63 ? text[..63] : text;
     }
 
+    private void SetTraySafe(Icon icon, string text)
+    {
+        if (_overlay.InvokeRequired)
+            _overlay.BeginInvoke(() => SetTray(icon, text));
+        else
+            SetTray(icon, text);
+    }
+
     public void ExitApp()
     {
         _tray.Visible = false;
         _hook.Dispose();
         _recorder.Dispose();
+        _streaming.Dispose();
         _engine.Dispose();
         Application.Exit();
     }
@@ -492,6 +582,7 @@ public sealed class TrayContext : ApplicationContext
             _tray.Dispose();
             _hook.Dispose();
             _recorder.Dispose();
+            _streaming.Dispose();
             _engine.Dispose();
         }
         base.Dispose(disposing);
@@ -503,29 +594,26 @@ public sealed class TrayContext : ApplicationContext
         => s.Length <= max ? s : s[..max] + "…";
 }
 
-/// <summary>Programmatically drawn tray icons (a small mic capsule), one per state.</summary>
+/// <summary>Tray icons drawn from the brand tile — violet wave, tinted per state.</summary>
 public static class TrayIcons
 {
-    public static readonly Icon Idle = Make(Color.FromArgb(230, 230, 238));
-    public static readonly Icon Recording = Make(Color.FromArgb(235, 70, 70));
-    public static readonly Icon Processing = Make(Color.FromArgb(124, 92, 255));
-    public static readonly Icon Loading = Make(Color.FromArgb(235, 170, 60));
-    public static readonly Icon Disabled = Make(Color.FromArgb(110, 110, 120));
+    public static readonly Icon Idle = Make(Color.FromArgb(109, 74, 255), Color.FromArgb(175, 74, 255));
+    public static readonly Icon Recording = Make(Color.FromArgb(235, 60, 80), Color.FromArgb(255, 110, 70));
+    public static readonly Icon Processing = Make(Color.FromArgb(60, 110, 235), Color.FromArgb(110, 74, 255));
+    public static readonly Icon Loading = Make(Color.FromArgb(230, 150, 50), Color.FromArgb(255, 190, 80));
+    public static readonly Icon Disabled = Make(Color.FromArgb(95, 95, 105), Color.FromArgb(120, 120, 132));
 
-    private static Icon Make(Color color)
+    private static Icon Make(Color top, Color bottom)
     {
         using var bmp = new Bitmap(32, 32);
         using (var g = Graphics.FromImage(bmp))
         {
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            using var brush = new SolidBrush(color);
-            using var pen = new Pen(color, 3);
-            g.FillRectangle(brush, 12, 3, 8, 15);
-            g.FillEllipse(brush, 12, 0, 8, 8);
-            g.FillEllipse(brush, 12, 14, 8, 8);
-            g.DrawArc(pen, 7, 8, 18, 16, 0, 180);
-            g.DrawLine(pen, 16, 24, 16, 29);
-            g.DrawLine(pen, 10, 29, 22, 29);
+            var rect = new Rectangle(0, 0, 32, 32);
+            using var path = AssetGenerator.RoundedRect(rect, 8);
+            using var grad = new System.Drawing.Drawing2D.LinearGradientBrush(rect, top, bottom, 55f);
+            g.FillPath(grad, path);
+            AssetGenerator.DrawWave(g, rect, 2.6f, Color.White);
         }
         return Icon.FromHandle(bmp.GetHicon());
     }

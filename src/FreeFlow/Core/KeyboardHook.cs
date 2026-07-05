@@ -15,6 +15,13 @@ public sealed class KeyboardHook : IDisposable
     public event Action? CommandKeyDown;
     public event Action? CommandKeyUp;
     public event Action? OtherKeyPressed;
+    /// <summary>Fired once with the virtual-key code after CaptureNextKey(); that keystroke is swallowed.</summary>
+    public event Action<int>? KeyCaptured;
+
+    private volatile bool _captureNext;
+
+    public void CaptureNextKey() => _captureNext = true;
+    public void CancelKeyCapture() => _captureNext = false;
 
     private IntPtr _hookId = IntPtr.Zero;
     private LowLevelKeyboardProc? _proc; // kept referenced so the GC never collects it
@@ -62,6 +69,17 @@ public sealed class KeyboardHook : IDisposable
                 bool isDown = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
                 bool isUp = msg == WM_KEYUP || msg == WM_SYSKEYUP;
                 int vk = (int)info.vkCode;
+
+                if (_captureNext)
+                {
+                    if (isDown)
+                    {
+                        _captureNext = false;
+                        var captured = vk;
+                        SafeRaise(() => KeyCaptured?.Invoke(captured));
+                    }
+                    return (IntPtr)1; // swallow both down and the following up
+                }
 
                 if (vk == _hotkeyVk && _hotkeyVk != 0)
                 {
@@ -167,7 +185,26 @@ public static class Vk
         ["F9"] = 0x78, ["F10"] = 0x79, ["F11"] = 0x7A, ["F12"] = 0x7B,
     };
 
-    public static int FromName(string name) => Map.TryGetValue(name, out var vk) ? vk : 0;
+    public static int FromName(string name)
+    {
+        if (Map.TryGetValue(name, out var vk)) return vk;
+        if (name.StartsWith("VK_0x", StringComparison.OrdinalIgnoreCase) &&
+            int.TryParse(name[5..], System.Globalization.NumberStyles.HexNumber, null, out var hex))
+            return hex;
+        if (Enum.TryParse<Keys>(name, ignoreCase: true, out var key))
+            return (int)key;
+        return 0;
+    }
+
+    /// <summary>Friendly name for any captured virtual key (round-trips through FromName).</summary>
+    public static string NameOf(int vk)
+    {
+        foreach (var (name, code) in Map)
+            if (code == vk) return name;
+        if (Enum.IsDefined(typeof(Keys), vk))
+            return ((Keys)vk).ToString();
+        return $"VK_0x{vk:X2}";
+    }
 
     public static string[] Names => Map.Keys.ToArray();
 

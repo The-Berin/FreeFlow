@@ -24,7 +24,9 @@ public static class SelfTest
         TestConfig();
         TestFormatter();
         TestResampler();
+        TestChunkResampler();
         TestTranscription();
+        TestStreaming();
 
         Report.AppendLine(new string('-', 60));
         Report.AppendLine(_failures == 0 ? "ALL TESTS PASSED" : $"{_failures} FAILURE(S)");
@@ -143,6 +145,44 @@ public static class SelfTest
     [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
     private static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder lpString, int nMaxCount);
 
+    /// <summary>Animates the overlay pill with synthetic audio + words for ~14s so you can see the design without a mic.</summary>
+    public static int PillPreview()
+    {
+        var overlay = new UI.OverlayForm();
+        _ = overlay.Handle;
+        overlay.SetState(UI.OverlayState.Listening);
+
+        string[] script = "this is what live dictation looks like words appear the moment you say them and the equalizer dances behind them".Split(' ');
+        int tick = 0;
+        var rng = new Random(7);
+        var driver = new System.Windows.Forms.Timer { Interval = 66 };
+        driver.Tick += (_, _) =>
+        {
+            tick++;
+            var bands = new float[16];
+            for (int i = 0; i < bands.Length; i++)
+            {
+                double envelope = 0.35 + 0.65 * Math.Abs(Math.Sin(tick / 9.0 + i));
+                double speech = Math.Max(0, 1.2 - Math.Abs(i - (tick % 12)) * 0.22);
+                bands[i] = (float)Math.Min(1.0, (0.15 + 0.85 * rng.NextDouble()) * envelope * (0.4 + speech));
+            }
+            overlay.PushSpectrum(bands);
+
+            int words = Math.Min(script.Length, tick / 7);
+            overlay.SetLiveText(string.Join(' ', script.Take(words)));
+
+            if (tick == 165)
+                overlay.SetState(UI.OverlayState.Processing);
+            if (tick == 190)
+                overlay.SetState(UI.OverlayState.Success, "This is what live dictation looks like…");
+            if (tick >= 215)
+                Application.Exit();
+        };
+        driver.Start();
+        Application.Run();
+        return 0;
+    }
+
     public static int TranscribeFile(string wavPath)
     {
         var cfg = AppConfig.Load();
@@ -226,6 +266,116 @@ public static class SelfTest
         Check("resampler length", Math.Abs(dst.Length - 16000) <= 1, $"got {dst.Length}");
         Check("resampler range", dst.All(f => f is >= -1.01f and <= 1.01f));
     }
+
+    private static void TestChunkResampler()
+    {
+        // chunked streaming resample must agree with the one-shot resampler
+        var src = new float[48000];
+        for (int i = 0; i < src.Length; i++)
+            src[i] = (float)Math.Sin(2 * Math.PI * 300 * i / 48000.0);
+
+        var streamed = new List<float>();
+        var rs = new ChunkResampler(48000, 16000);
+        for (int off = 0; off < src.Length; off += 480)
+            streamed.AddRange(rs.Process(src.Skip(off).Take(480).ToArray()));
+
+        Check("chunk resampler length", Math.Abs(streamed.Count - 16000) <= 2, $"got {streamed.Count}");
+
+        var oneShot = AudioRecorder.Resample(src, 48000, 16000);
+        double maxDiff = 0;
+        int n = Math.Min(streamed.Count, oneShot.Length);
+        for (int i = 0; i < n; i++)
+            maxDiff = Math.Max(maxDiff, Math.Abs(streamed[i] - oneShot[i]));
+        Check("chunk resampler seamless", maxDiff < 0.02, $"max diff {maxDiff:0.0000}");
+    }
+
+    private static void TestStreaming()
+    {
+        var streamModel = ModelRegistry.Get(ModelRegistry.StreamingModelId);
+        if (!streamModel.IsDownloaded())
+        {
+            Check("streaming model downloaded", false, "not downloaded — live mode unavailable");
+            return;
+        }
+        Check("streaming model downloaded", true);
+
+        var cfg = AppConfig.Load();
+        using var streaming = new StreamingEngine();
+        var loadSw = System.Diagnostics.Stopwatch.StartNew();
+        streaming.Load(cfg);
+        Check("streaming engine load", streaming.IsLoaded,
+            streaming.IsLoaded ? $"{loadSw.ElapsedMilliseconds}ms" : streaming.LoadError ?? "");
+        if (!streaming.IsLoaded) return;
+        Check("punctuation model load", streaming.PunctLoaded, streaming.PunctLoaded ? "" : "missing — live text will be unpunctuated");
+
+        string wav = Path.Combine(Path.GetTempPath(), "freeflow_streamtest.wav");
+        try
+        {
+            using (var synth = new SpeechSynthesizer())
+            {
+                synth.SetOutputToWaveFile(wav, new SpeechAudioFormatInfo(16000, AudioBitsPerSample.Sixteen, AudioChannel.Mono));
+                synth.Rate = 0;
+                synth.Speak("The quick brown fox jumps over the lazy dog and then runs far away into the green forest.");
+            }
+            var samples = LoadWavAs16kMono(wav);
+            double audioSec = samples.Length / 16000.0;
+
+            var partialAtChunk = new List<int>();
+            int fedChunks = 0;
+            streaming.Partial += _ => { lock (partialAtChunk) partialAtChunk.Add(fedChunks); };
+
+            streaming.StartSession();
+            const int chunk = 1600; // 100 ms
+            int totalChunks = (samples.Length + chunk - 1) / chunk;
+            for (int off = 0; off < samples.Length; off += chunk)
+            {
+                fedChunks++;
+                streaming.Feed(samples.Skip(off).Take(chunk).ToArray());
+                Thread.Sleep(12); // give the decode thread breathing room, ~8x realtime
+            }
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            string final = streaming.FinishSession();
+            sw.Stop();
+
+            int firstPartialChunk;
+            int partialCount;
+            lock (partialAtChunk)
+            {
+                firstPartialChunk = partialAtChunk.Count > 0 ? partialAtChunk[0] : int.MaxValue;
+                partialCount = partialAtChunk.Count;
+            }
+
+            Check("streaming partials fired", partialCount >= 3, $"{partialCount} partial updates");
+            Check("words arrived WHILE speaking", firstPartialChunk < totalChunks * 0.7,
+                $"first partial after chunk {firstPartialChunk}/{totalChunks}");
+            Check("streaming final text", final.Contains("quick brown fox") && final.Contains("lazy dog"),
+                $"\"{Truncate(final, 90)}\"");
+            Check("streaming finish is fast", sw.ElapsedMilliseconds < 3000, $"{sw.ElapsedMilliseconds}ms drain");
+
+            string punctuated = streaming.Punctuate(final);
+            Check("punctuation restored", punctuated.Length > 0 &&
+                (char.IsUpper(punctuated[0]) || punctuated != final),
+                $"\"{Truncate(punctuated, 90)}\"");
+
+            // second session on the same engine must work (stream reuse bug guard)
+            streaming.StartSession();
+            streaming.Feed(samples.Take(16000).ToArray());
+            Thread.Sleep(300);
+            string second = streaming.FinishSession();
+            Check("second session works", second.Length > 0, $"\"{Truncate(second, 60)}\"");
+        }
+        catch (Exception ex)
+        {
+            Check("streaming pipeline", false, ex.Message);
+        }
+        finally
+        {
+            try { File.Delete(wav); } catch { }
+        }
+    }
+
+    private static string Truncate(string s, int max)
+        => s.Length <= max ? s : s[..max] + "…";
 
     private static void TestTranscription()
     {

@@ -10,7 +10,11 @@ namespace FreeFlow.Core;
 public sealed class AudioRecorder : IDisposable
 {
     public event Action<float>? Level;      // RMS 0..1 per buffer while capturing
+    public event Action<float[]>? Spectrum; // ~16 log-spaced band magnitudes 0..1 while capturing
+    public event Action<float[]>? Samples16k; // live 16 kHz mono chunks while capturing (for streaming STT)
     public event Action<string>? Error;
+
+    private ChunkResampler? _liveResampler;
 
     private readonly object _lock = new();
     private WaveInEvent? _waveIn;
@@ -58,6 +62,7 @@ public sealed class AudioRecorder : IDisposable
     {
         lock (_lock)
         {
+            _liveResampler = new ChunkResampler(_actualRate, 16000);
             _current = new List<float>(_actualRate * 15);
             // seed with the pre-roll from the ring buffer so we don't clip speech onset
             if (_ringFilled > 0)
@@ -163,9 +168,11 @@ public sealed class AudioRecorder : IDisposable
         }
 
         bool capturing;
+        ChunkResampler? liveResampler;
         lock (_lock)
         {
             capturing = _capturing;
+            liveResampler = _liveResampler;
             if (capturing)
                 _current.AddRange(floats);
             if (_ring.Length > 0)
@@ -180,7 +187,40 @@ public sealed class AudioRecorder : IDisposable
         }
 
         if (capturing)
+        {
             Level?.Invoke((float)Math.Sqrt(sumSq / n));
+            Spectrum?.Invoke(ComputeSpectrum(floats, _actualRate));
+            if (Samples16k != null && liveResampler != null)
+            {
+                var live = liveResampler.Process(floats);
+                if (live.Length > 0)
+                    Samples16k.Invoke(live);
+            }
+        }
+    }
+
+    /// <summary>Cheap Goertzel magnitudes at log-spaced speech frequencies for the equalizer.</summary>
+    private static float[] ComputeSpectrum(float[] frame, int rate)
+    {
+        const int bands = 16;
+        var mags = new float[bands];
+        double fMin = 90, fMax = Math.Min(6500, rate / 2.0 - 200);
+        for (int b = 0; b < bands; b++)
+        {
+            double freq = fMin * Math.Pow(fMax / fMin, b / (double)(bands - 1));
+            double w = 2 * Math.PI * freq / rate;
+            double coeff = 2 * Math.Cos(w);
+            double s0, s1 = 0, s2 = 0;
+            for (int i = 0; i < frame.Length; i++)
+            {
+                s0 = frame[i] + coeff * s1 - s2;
+                s2 = s1;
+                s1 = s0;
+            }
+            double power = s1 * s1 + s2 * s2 - coeff * s1 * s2;
+            mags[b] = (float)Math.Min(1.0, Math.Sqrt(Math.Max(0, power)) / frame.Length * 40);
+        }
+        return mags;
     }
 
     private void OnStopped(object? sender, StoppedEventArgs e)
@@ -213,5 +253,48 @@ public sealed class AudioRecorder : IDisposable
     public void Dispose()
     {
         lock (_lock) { CloseDevice(); }
+    }
+}
+
+/// <summary>
+/// Linear resampler that carries its fractional position and last sample across
+/// chunks, so a continuous stream can be resampled chunk-by-chunk without seams.
+/// </summary>
+public sealed class ChunkResampler
+{
+    private readonly double _step;  // source samples advanced per output sample
+    private double _frac;           // fractional position inside the current source interval
+    private float _prev;
+    private bool _hasPrev;
+
+    public ChunkResampler(int srcRate, int dstRate)
+    {
+        _step = (double)srcRate / dstRate;
+    }
+
+    public float[] Process(float[] chunk)
+    {
+        if (chunk.Length == 0) return Array.Empty<float>();
+        if (Math.Abs(_step - 1.0) < 1e-9) return chunk;
+
+        var output = new List<float>((int)(chunk.Length / _step) + 2);
+        foreach (var s in chunk)
+        {
+            if (!_hasPrev)
+            {
+                _prev = s;
+                _hasPrev = true;
+                continue;
+            }
+            // emit every output sample that falls inside the interval [_prev, s]
+            while (_frac < 1.0)
+            {
+                output.Add((float)(_prev * (1 - _frac) + s * _frac));
+                _frac += _step;
+            }
+            _frac -= 1.0;
+            _prev = s;
+        }
+        return output.ToArray();
     }
 }

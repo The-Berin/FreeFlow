@@ -11,9 +11,14 @@
     <RootNamespace>FreeFlow</RootNamespace>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
-    <Version>1.0.0</Version>
+    <Version>2.0.0</Version>
     <Description>FreeFlow - free, local, private voice dictation for Windows</Description>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="Assets\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="NAudio" Version="2.3.0" />
