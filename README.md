@@ -42,8 +42,6 @@ Settings apply instantly — no save button.
 | Final polish | **NVIDIA Parakeet TDT 0.6B v2** (int8, 652 MB) | re-transcribes the utterance on release; beats Whisper large-v3 on English |
 | Multilingual | Whisper small/base (optional) | 100+ languages |
 
-Measured on the i7-4790: streaming partials arrive while audio is still being fed (first words < 1 s in), Parakeet polishes 3.4 s of speech in ~500 ms.
-
 Command mode (select text, hold command key, say "make this more concise") works with any OpenAI-compatible endpoint — install [Ollama](https://ollama.com) for free local AI.
 
 ## Build & verify
