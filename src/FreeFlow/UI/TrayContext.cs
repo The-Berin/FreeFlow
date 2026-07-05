@@ -31,6 +31,8 @@ public sealed class TrayContext : ApplicationContext
     private volatile string _pendingPartial = "";
     private int _partialScheduled;
 
+    private bool _narrowbandWarned;
+
     // smart spacing state
     private int _lastInjectedLength;
     private string _lastInjectedApp = "";
@@ -383,6 +385,15 @@ public sealed class TrayContext : ApplicationContext
                 _lastInjectedApp = _targetApp.ProcessName;
                 _lastInjectedAt = DateTime.UtcNow;
                 _typedSinceInjection = false;
+
+                if (!_narrowbandWarned && _recorder.IsBluetoothDevice && _recorder.LastCaptureNarrowband)
+                {
+                    _narrowbandWarned = true;
+                    _tray.ShowBalloonTip(8000, "Bluetooth mic is in phone-quality mode",
+                        "Your adapter negotiated the 8 kHz codec. Dictation still works — accuracy is just a bit lower. " +
+                        "Updating the Bluetooth adapter driver sometimes unlocks the 16 kHz wideband codec.",
+                        ToolTipIcon.Info);
+                }
 
                 int words = text.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length;
                 StatsStore.RecordDictation(words, audioSec, sw.ElapsedMilliseconds);

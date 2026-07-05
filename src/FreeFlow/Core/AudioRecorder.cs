@@ -42,6 +42,14 @@ public sealed class AudioRecorder : IDisposable
     private List<float> _current = new();
     private ChunkResampler? _liveResampler;
 
+    // spectral bookkeeping to spot a narrowband (phone-quality) Bluetooth link
+    private double _midBandSum, _hiBandSum;
+    private int _bandFrames;
+
+    /// <summary>True when the last capture had speech energy but nothing above ~4 kHz —
+    /// the signature of an 8 kHz Bluetooth hands-free link.</summary>
+    public bool LastCaptureNarrowband { get; private set; }
+
     private const int PreRollMs = 250;
     private static readonly string[] BluetoothMarkers = { "hands-free", "airpod", "headset", "bluetooth" };
 
@@ -97,6 +105,8 @@ public sealed class AudioRecorder : IDisposable
                     _current.Add(_ring[(start + i) % _ring.Length]);
             }
             _capturing = true;
+            _midBandSum = _hiBandSum = 0;
+            _bandFrames = 0;
             if (_deviceRunning)
             {
                 _firstAudioPending = false; // already flowing — no wake-up delay to wait out
@@ -121,6 +131,9 @@ public sealed class AudioRecorder : IDisposable
             _capturing = false;
             samples = _current.ToArray();
             _current = new List<float>();
+            double mid = _bandFrames > 0 ? _midBandSum / _bandFrames : 0;
+            double hi = _bandFrames > 0 ? _hiBandSum / _bandFrames : 0;
+            LastCaptureNarrowband = _bandFrames > 15 && mid > 0.02 && hi < mid * 0.08;
             ScheduleCloseLocked();
         }
         return _actualRate == 16000 ? samples : Resample(samples, _actualRate, 16000);
@@ -327,7 +340,15 @@ public sealed class AudioRecorder : IDisposable
         if (capturing)
         {
             Level?.Invoke((float)Math.Sqrt(sumSq / n));
-            Spectrum?.Invoke(ComputeSpectrum(floats, _actualRate));
+            var mags = ComputeSpectrum(floats, _actualRate);
+            lock (_lock)
+            {
+                // bands are log-spaced 90 Hz → 6.5 kHz; 5..9 ≈ speech mids, 13..15 ≥ ~4 kHz
+                _midBandSum += (mags[5] + mags[6] + mags[7] + mags[8] + mags[9]) / 5.0;
+                _hiBandSum += (mags[13] + mags[14] + mags[15]) / 3.0;
+                _bandFrames++;
+            }
+            Spectrum?.Invoke(mags);
             if (Samples16k != null && liveResampler != null)
             {
                 var live = liveResampler.Process(floats);
@@ -363,12 +384,28 @@ public sealed class AudioRecorder : IDisposable
 
     private void OnStopped(object? sender, StoppedEventArgs e)
     {
-        if (e.Exception != null)
+        if (e.Exception == null) return;
+        Logger.Log(e.Exception, "recording stopped unexpectedly");
+
+        // Bluetooth links hiccup — if it dies mid-dictation, re-open and keep the
+        // take alive instead of losing everything said so far (Wispr just drops it)
+        bool recovered = false, wasCapturing;
+        lock (_lock)
         {
-            Logger.Log(e.Exception, "recording stopped unexpectedly");
-            lock (_lock) { _deviceRunning = false; }
-            Error?.Invoke($"Microphone error: {e.Exception.Message}");
+            _deviceRunning = false;
+            wasCapturing = _capturing;
+            if (wasCapturing)
+            {
+                CloseDeviceLocked();
+                Thread.Sleep(300);
+                TryOpenAndStartLocked();
+                recovered = _deviceRunning;
+                if (recovered)
+                    Logger.Log("mic recovered mid-dictation after dropout");
+            }
         }
+        if (wasCapturing && !recovered)
+            Error?.Invoke("Microphone dropped out — released what was captured so far.");
     }
 
     public static float[] Resample(float[] src, int srcRate, int dstRate)
