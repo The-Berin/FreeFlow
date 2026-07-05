@@ -30,9 +30,8 @@ public sealed class MainForm : Form
     private Label _sideStatus = null!;
 
     // Dictation
-    private CheckBox _liveTyping = null!, _showPill = null!, _fillers = null!, _spokenCmds = null!, _punctWords = null!, _smartSpace = null!, _sounds = null!;
+    private CheckBox _liveTyping = null!, _fillers = null!, _spokenCmds = null!, _punctWords = null!, _smartSpace = null!, _sounds = null!;
     private ComboBox _finalPass = null!, _defaultTone = null!;
-    private TextBox _fillerList = null!;
 
     // Settings
     private Button _hotkeyBtn = null!, _cmdHotkeyBtn = null!;
@@ -375,17 +374,11 @@ public sealed class MainForm : Form
             "Just add punctuation (instant)",
             "Leave live text as-is",
         });
-        p.Controls.Add(_finalPass); y += 36;
-
-        _showPill = new CheckBox { Text = "Show the floating pill (equalizer + live transcript)", Location = new Point(0, y), AutoSize = true };
-        p.Controls.Add(_showPill); y += 42;
+        p.Controls.Add(_finalPass); y += 44;
 
         p.Controls.Add(Header("Auto-edits", y)); y += 36;
-        _fillers = new CheckBox { Text = "Remove filler words", Location = new Point(0, y), AutoSize = true };
+        _fillers = new CheckBox { Text = "Remove filler words (um, uh, hmm…)", Location = new Point(0, y), AutoSize = true };
         p.Controls.Add(_fillers); y += 28;
-        p.Controls.Add(FieldLabel("Filler words", 0, y));
-        _fillerList = new TextBox { Location = new Point(120, y), Width = 440 };
-        p.Controls.Add(_fillerList); y += 34;
         _spokenCmds = new CheckBox { Text = "Spoken commands: \"new line\", \"new paragraph\", \"scratch that\"", Location = new Point(0, y), AutoSize = true };
         p.Controls.Add(_spokenCmds); y += 28;
         _punctWords = new CheckBox { Text = "Spoken punctuation: \"comma\", \"period\" (off = automatic punctuation)", Location = new Point(0, y), AutoSize = true };
@@ -844,9 +837,7 @@ public sealed class MainForm : Form
 
         _liveTyping.Checked = c.LiveTyping;
         _finalPass.SelectedIndex = c.FinalPass switch { "punct" => 1, "off" => 2, _ => 0 };
-        _showPill.Checked = c.ShowPill;
         _fillers.Checked = c.RemoveFillers;
-        _fillerList.Text = string.Join(", ", c.FillerWords);
         _spokenCmds.Checked = c.SpokenCommands;
         _punctWords.Checked = c.PunctuationWords;
         _smartSpace.Checked = c.SmartSpacing;
@@ -878,7 +869,7 @@ public sealed class MainForm : Form
             foreach (var control in new Control[]
                      {
                          _tapToLatch, _tapMs, _swallow, _warm, _gain, _threads, _language, _mic,
-                         _liveTyping, _finalPass, _showPill, _fillers, _fillerList, _spokenCmds,
+                         _liveTyping, _finalPass, _fillers, _spokenCmds,
                          _punctWords, _smartSpace, _sounds, _defaultTone,
                          _aiEnabled, _aiUrl, _aiModel, _aiKey, _aiPolish,
                      })
@@ -922,9 +913,7 @@ public sealed class MainForm : Form
 
         c.LiveTyping = _liveTyping.Checked;
         c.FinalPass = _finalPass.SelectedIndex switch { 1 => "punct", 2 => "off", _ => "parakeet" };
-        c.ShowPill = _showPill.Checked;
         c.RemoveFillers = _fillers.Checked;
-        c.FillerWords = _fillerList.Text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
         c.SpokenCommands = _spokenCmds.Checked;
         c.PunctuationWords = _punctWords.Checked;
         c.SmartSpacing = _smartSpace.Checked;

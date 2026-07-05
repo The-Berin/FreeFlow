@@ -52,13 +52,9 @@ public class AppConfig
     /// "parakeet" = re-transcribe with the accurate model and replace the live text (best),
     /// "punct" = just punctuate the live text (instant), "off" = leave the live text as typed.</summary>
     public string FinalPass { get; set; } = "parakeet";
-    /// <summary>Show the floating pill with the live equalizer + transcript.</summary>
-    public bool ShowPill { get; set; } = true;
 
     // Formatting
     public bool RemoveFillers { get; set; } = true;
-    public List<string> FillerWords { get; set; } =
-        new() { "um", "umm", "uh", "uhh", "er", "erm", "hmm", "mhm" };
     public bool SpokenCommands { get; set; } = true;
     public bool PunctuationWords { get; set; } = false;
     public bool SmartSpacing { get; set; } = true;

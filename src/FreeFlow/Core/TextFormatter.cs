@@ -10,6 +10,12 @@ public record FormatResult(string Text, bool DeleteLast);
 /// </summary>
 public static class TextFormatter
 {
+    private static readonly string FillerPattern =
+        @"(?<=^|\s|\p{P})(?:" +
+        string.Join("|", new[] { "um", "umm", "uh", "uhh", "er", "erm", "hmm", "hm", "mhm", "mm-hmm" }
+            .Select(Regex.Escape)) +
+        @")\b[,.]?\s*";
+
     public static FormatResult Format(string raw, AppConfig cfg, string tone)
     {
         string text = (raw ?? "").Trim();
@@ -35,16 +41,9 @@ public static class TextFormatter
         if (scratch.Success)
             text = text[(scratch.Index + scratch.Length)..].TrimStart();
 
-        if (cfg.RemoveFillers && cfg.FillerWords.Count > 0)
+        if (cfg.RemoveFillers)
         {
-            string alts = string.Join("|", cfg.FillerWords
-                .Where(w => w.Trim().Length > 0)
-                .Select(w => Regex.Escape(w.Trim())));
-            if (alts.Length > 0)
-            {
-                text = Regex.Replace(text, $@"(?<=^|\s|\p{{P}})(?:{alts})\b[,.]?\s*", "",
-                    RegexOptions.IgnoreCase);
-            }
+            text = Regex.Replace(text, FillerPattern, "", RegexOptions.IgnoreCase);
         }
 
         if (cfg.SpokenCommands)

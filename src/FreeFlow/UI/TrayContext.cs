@@ -234,8 +234,7 @@ public sealed class TrayContext : ApplicationContext
 
         _recorder.StartCapture();
         _state = FlowState.Recording;
-        if (_cfg.ShowPill)
-            _overlay.SetState(OverlayState.Listening);
+        _overlay.SetState(OverlayState.Listening);
         SetTray(TrayIcons.Recording, "FreeFlow — listening");
         SoundFx.RecordStart(_cfg);
     }
