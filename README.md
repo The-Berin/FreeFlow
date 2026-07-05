@@ -56,7 +56,6 @@ FreeFlow.exe --selftest          # 33 checks: formatter, resamplers, TTS→STT, 
 FreeFlow.exe --injecttest        # live text-injection proof
 FreeFlow.exe --pillpreview       # animated demo of the overlay pill
 FreeFlow.exe --transcribe x.wav  # transcribe any wav
-FreeFlow.exe --makeassets <dir>  # regenerate logo/icon/banner
 ```
 
 Models live in `%APPDATA%\FreeFlow\models`, config/history/stats in `%APPDATA%\FreeFlow`.

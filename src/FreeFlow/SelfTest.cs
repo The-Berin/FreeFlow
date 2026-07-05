@@ -152,7 +152,6 @@ public static class SelfTest
         _ = overlay.Handle;
         overlay.SetState(UI.OverlayState.Listening);
 
-        string[] script = "this is what live dictation looks like words appear the moment you say them and the equalizer dances behind them".Split(' ');
         int tick = 0;
         var rng = new Random(7);
         var driver = new System.Windows.Forms.Timer { Interval = 66 };
@@ -168,14 +167,11 @@ public static class SelfTest
             }
             overlay.PushSpectrum(bands);
 
-            int words = Math.Min(script.Length, tick / 7);
-            overlay.SetLiveText(string.Join(' ', script.Take(words)));
-
-            if (tick == 165)
+            if (tick == 120)
                 overlay.SetState(UI.OverlayState.Processing);
-            if (tick == 190)
-                overlay.SetState(UI.OverlayState.Success, "This is what live dictation looks like…");
-            if (tick >= 215)
+            if (tick == 145)
+                overlay.SetState(UI.OverlayState.Success);
+            if (tick >= 170)
                 Application.Exit();
         };
         driver.Start();

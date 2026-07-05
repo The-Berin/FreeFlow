@@ -19,8 +19,6 @@ internal static class Program
         }
         if (args.Length >= 2 && args[0] == "--transcribe")
             return SelfTest.TranscribeFile(args[1]);
-        if (args.Length >= 2 && args[0] == "--makeassets")
-            return AssetGenerator.Generate(args[1]);
         if (args.Contains("--pillpreview"))
         {
             ApplicationConfiguration.Initialize();

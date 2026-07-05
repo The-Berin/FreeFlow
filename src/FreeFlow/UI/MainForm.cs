@@ -147,7 +147,7 @@ public sealed class MainForm : Form
             BackColor = Color.Transparent,
         };
         try { logo.Image = Image.FromFile(Path.Combine(AppContext.BaseDirectory, "Assets", "logo64.png")); }
-        catch { using var tile = AssetGenerator.DrawTile(64); logo.Image = new Bitmap(tile); }
+        catch { /* assets ship with the app; sidebar just shows text if missing */ }
 
         var name = new Label
         {

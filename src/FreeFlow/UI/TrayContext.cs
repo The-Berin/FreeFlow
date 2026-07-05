@@ -242,7 +242,6 @@ public sealed class TrayContext : ApplicationContext
 
     private void OnPartialFromDecoder(string text)
     {
-        _overlay.SetLiveText(text);
         if (!_liveTyper.Active) return;
 
         _pendingPartial = text;
@@ -610,10 +609,10 @@ public static class TrayIcons
         {
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
             var rect = new Rectangle(0, 0, 32, 32);
-            using var path = AssetGenerator.RoundedRect(rect, 8);
+            using var path = Draw.RoundedRect(rect, 8);
             using var grad = new System.Drawing.Drawing2D.LinearGradientBrush(rect, top, bottom, 55f);
             g.FillPath(grad, path);
-            AssetGenerator.DrawWave(g, rect, 2.6f, Color.White);
+            Draw.Wave(g, rect, 2.6f, Color.White);
         }
         return Icon.FromHandle(bmp.GetHicon());
     }
