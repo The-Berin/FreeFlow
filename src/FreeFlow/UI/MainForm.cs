@@ -100,6 +100,13 @@ public sealed class MainForm : Form
         _ctx.EngineStateChanged += OnEngineStateChanged;
         FormClosing += (s, e) =>
         {
+            // flush any un-debounced or mid-edit changes before the window goes away
+            _applyDebounce.Stop();
+            foreach (var grid in new[] { _dictGrid, _snipGrid, _profGrid })
+                if (grid.IsCurrentCellInEditMode)
+                    grid.EndEdit();
+            CommitConfig();
+
             if (e.CloseReason == CloseReason.UserClosing)
             {
                 e.Cancel = true; // the app lives in the tray

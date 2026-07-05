@@ -205,14 +205,24 @@ public static class SelfTest
 
     private static void TestConfig()
     {
-        var c = new AppConfig { HotkeyName = "F9", MicGain = 2.5 };
-        c.Dictionary.Add(new DictionaryEntry { Spoken = "hey gen", Written = "HeyGen" });
-        c.Save();
-        var loaded = AppConfig.Load();
-        Check("config roundtrip", loaded.HotkeyName == "F9" && Math.Abs(loaded.MicGain - 2.5) < 0.001
-            && loaded.Dictionary.Count == 1 && loaded.Dictionary[0].Written == "HeyGen");
-        // restore defaults so the test never bricks the user's real config
-        new AppConfig().Save();
+        // NEVER touch the user's real settings: snapshot the file, test, put it back exactly
+        string? original = File.Exists(Paths.ConfigPath) ? File.ReadAllText(Paths.ConfigPath) : null;
+        try
+        {
+            var c = new AppConfig { HotkeyName = "F9", MicGain = 2.5 };
+            c.Dictionary.Add(new DictionaryEntry { Spoken = "hey gen", Written = "HeyGen" });
+            c.Save();
+            var loaded = AppConfig.Load();
+            Check("config roundtrip", loaded.HotkeyName == "F9" && Math.Abs(loaded.MicGain - 2.5) < 0.001
+                && loaded.Dictionary.Count == 1 && loaded.Dictionary[0].Written == "HeyGen");
+        }
+        finally
+        {
+            if (original != null)
+                File.WriteAllText(Paths.ConfigPath, original);
+            else if (File.Exists(Paths.ConfigPath))
+                File.Delete(Paths.ConfigPath);
+        }
     }
 
     private static void TestFormatter()

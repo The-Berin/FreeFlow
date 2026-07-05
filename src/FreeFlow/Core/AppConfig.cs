@@ -119,7 +119,10 @@ public class AppConfig
         try
         {
             Paths.EnsureDirs();
-            File.WriteAllText(Paths.ConfigPath, JsonSerializer.Serialize(this, JsonOpts));
+            // atomic write: a crash mid-save must never corrupt (and thereby reset) settings
+            string tmp = Paths.ConfigPath + ".tmp";
+            File.WriteAllText(tmp, JsonSerializer.Serialize(this, JsonOpts));
+            File.Move(tmp, Paths.ConfigPath, overwrite: true);
         }
         catch (Exception ex)
         {
