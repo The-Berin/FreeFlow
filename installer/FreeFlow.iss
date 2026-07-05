@@ -24,7 +24,7 @@ Source: "..\publish\FreeFlow.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\publish\Assets\*"; DestDir: "{app}\Assets"; Flags: ignoreversion recursesubdirs
 
 [Tasks]
-Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
+Name: desktopicon; Description: "Create a desktop shortcut"
 Name: autostart; Description: "Start FreeFlow when Windows starts"
 
 [Icons]
