@@ -67,6 +67,7 @@ public sealed class TrayContext : ApplicationContext
         _recorder.Level += rms => { }; // reserved for the app window mic meter
         _recorder.Spectrum += bands => _overlay.PushSpectrum(bands);
         _recorder.Samples16k += chunk => _streaming.Feed(chunk);
+        _recorder.FirstAudio += () => SoundFx.RecordStart(_cfg); // beep once audio actually flows (Bluetooth wake-up)
         _recorder.Error += msg => _overlay.SetState(OverlayState.Error, msg);
         _recorder.Configure(_cfg);
 
@@ -236,7 +237,6 @@ public sealed class TrayContext : ApplicationContext
         _state = FlowState.Recording;
         _overlay.SetState(OverlayState.Listening);
         SetTray(TrayIcons.Recording, "FreeFlow — listening");
-        SoundFx.RecordStart(_cfg);
     }
 
     private void OnPartialFromDecoder(string text)
@@ -529,8 +529,9 @@ public sealed class TrayContext : ApplicationContext
         bool hookChanged = fresh.HotkeyName != _cfg.HotkeyName
                            || fresh.CommandHotkeyName != _cfg.CommandHotkeyName
                            || fresh.SwallowHotkey != _cfg.SwallowHotkey;
-        bool audioChanged = fresh.MicDevice != _cfg.MicDevice
+        bool audioChanged = fresh.MicDeviceName != _cfg.MicDeviceName
                             || fresh.KeepMicWarm != _cfg.KeepMicWarm
+                            || fresh.MicLingerSeconds != _cfg.MicLingerSeconds
                             || Math.Abs(fresh.MicGain - _cfg.MicGain) > 0.001;
 
         _cfg = fresh;

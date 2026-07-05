@@ -1,20 +1,26 @@
+using NAudio.CoreAudioApi;
 using NAudio.Wave;
 
 namespace FreeFlow.Core;
 
 /// <summary>
-/// Microphone capture. In "warm" mode the device stays open, feeding a small ring
-/// buffer so the first syllable after the hotkey press is never clipped. Captured
-/// audio is returned as 16 kHz mono floats ready for the recognizer.
+/// Microphone capture, tuned for both wired and Bluetooth headsets.
+///
+/// Wired mics in "warm" mode stay open with a ring buffer so the first syllable
+/// is never clipped. Bluetooth hands-free mics (AirPods etc.) are auto-detected
+/// and handled differently: opening the HFP link hijacks the headset's audio
+/// quality, so the mic opens on demand and lingers ~20s after the last dictation —
+/// consecutive dictations are instant, and music quality comes back shortly after.
+/// A soft auto-gain lifts quiet Bluetooth mics to a usable level.
 /// </summary>
 public sealed class AudioRecorder : IDisposable
 {
     public event Action<float>? Level;      // RMS 0..1 per buffer while capturing
     public event Action<float[]>? Spectrum; // ~16 log-spaced band magnitudes 0..1 while capturing
     public event Action<float[]>? Samples16k; // live 16 kHz mono chunks while capturing (for streaming STT)
+    /// <summary>First audio buffer of a capture actually arrived — safe to tell the user "talk now".</summary>
+    public event Action? FirstAudio;
     public event Action<string>? Error;
-
-    private ChunkResampler? _liveResampler;
 
     private readonly object _lock = new();
     private WaveInEvent? _waveIn;
@@ -23,16 +29,26 @@ public sealed class AudioRecorder : IDisposable
     private bool _deviceRunning;
     private bool _capturing;
     private double _gain = 1.0;
-    private int _deviceNumber = -1;
+    private double _agcGain = 1.0;
+    private string _deviceName = "";
+    private bool _isBluetooth;
+    private int _lingerSeconds = 20;
+    private System.Threading.Timer? _lingerTimer;
+    private bool _firstAudioPending;
 
     private float[] _ring = Array.Empty<float>();
     private int _ringPos;
     private int _ringFilled;
     private List<float> _current = new();
+    private ChunkResampler? _liveResampler;
 
     private const int PreRollMs = 250;
+    private static readonly string[] BluetoothMarkers = { "hands-free", "airpod", "headset", "bluetooth" };
 
     public bool IsWarm => _warm && _deviceRunning;
+    public bool IsBluetoothDevice { get { lock (_lock) return _isBluetooth; } }
+
+    public static bool AnyDevicePresent => WaveInEvent.DeviceCount > 0;
 
     public static List<(int Index, string Name)> ListDevices()
     {
@@ -49,22 +65,30 @@ public sealed class AudioRecorder : IDisposable
     {
         lock (_lock)
         {
-            CloseDevice();
+            CloseDeviceLocked();
             _warm = cfg.KeepMicWarm;
             _gain = cfg.MicGain;
-            _deviceNumber = cfg.MicDevice;
-            if (_warm)
-                TryOpenAndStart();
+            _deviceName = cfg.MicDeviceName;
+            _lingerSeconds = Math.Clamp(cfg.MicLingerSeconds, 3, 120);
+            _agcGain = 1.0;
+
+            // warm mode only makes sense for wired mics — holding a Bluetooth
+            // hands-free link open ruins the headset's playback quality
+            var (_, _, isBt) = ResolveDevice();
+            _isBluetooth = isBt;
+            if (_warm && !isBt)
+                TryOpenAndStartLocked();
         }
     }
 
     public void StartCapture()
     {
+        bool signalReadyNow = false;
         lock (_lock)
         {
+            CancelLingerLocked();
             _liveResampler = new ChunkResampler(_actualRate, 16000);
             _current = new List<float>(_actualRate * 15);
-            // seed with the pre-roll from the ring buffer so we don't clip speech onset
             if (_ringFilled > 0)
             {
                 int want = Math.Min(_actualRate * PreRollMs / 1000, _ringFilled);
@@ -73,9 +97,19 @@ public sealed class AudioRecorder : IDisposable
                     _current.Add(_ring[(start + i) % _ring.Length]);
             }
             _capturing = true;
-            if (!_deviceRunning)
-                TryOpenAndStart();
+            if (_deviceRunning)
+            {
+                _firstAudioPending = false; // already flowing — no wake-up delay to wait out
+                signalReadyNow = true;
+            }
+            else
+            {
+                _firstAudioPending = true;  // signalled from OnData when the first buffer lands
+                TryOpenAndStartLocked();
+            }
         }
+        if (signalReadyNow)
+            FirstAudio?.Invoke();
     }
 
     /// <summary>Stops capturing and returns audio resampled to 16 kHz mono.</summary>
@@ -87,8 +121,7 @@ public sealed class AudioRecorder : IDisposable
             _capturing = false;
             samples = _current.ToArray();
             _current = new List<float>();
-            if (!_warm)
-                CloseDevice();
+            ScheduleCloseLocked();
         }
         return _actualRate == 16000 ? samples : Resample(samples, _actualRate, 16000);
     }
@@ -99,47 +132,122 @@ public sealed class AudioRecorder : IDisposable
         {
             _capturing = false;
             _current = new List<float>();
-            if (!_warm)
-                CloseDevice();
+            ScheduleCloseLocked();
         }
     }
 
-    private void TryOpenAndStart()
+    /// <summary>Keep the device open briefly after a dictation so the next one starts instantly.</summary>
+    private void ScheduleCloseLocked()
     {
-        foreach (int rate in new[] { 16000, 48000, 44100 })
+        if (_warm && !_isBluetooth)
+            return; // wired warm mode: stays open for the ring buffer
+
+        CancelLingerLocked();
+        _lingerTimer = new System.Threading.Timer(_ =>
         {
+            lock (_lock)
+            {
+                if (!_capturing)
+                    CloseDeviceLocked();
+            }
+        }, null, TimeSpan.FromSeconds(_lingerSeconds), Timeout.InfiniteTimeSpan);
+    }
+
+    private void CancelLingerLocked()
+    {
+        _lingerTimer?.Dispose();
+        _lingerTimer = null;
+    }
+
+    private (int Index, string Name, bool IsBluetooth) ResolveDevice()
+    {
+        string name = _deviceName;
+        int index = -1;
+
+        if (!string.IsNullOrWhiteSpace(name))
+        {
+            // match by name so Bluetooth reconnects (which shuffle device numbers) still find it
+            for (int i = 0; i < WaveInEvent.DeviceCount; i++)
+            {
+                try
+                {
+                    var product = WaveInEvent.GetCapabilities(i).ProductName;
+                    if (product.Contains(name, StringComparison.OrdinalIgnoreCase) ||
+                        name.Contains(product, StringComparison.OrdinalIgnoreCase))
+                    {
+                        index = i;
+                        name = product;
+                        break;
+                    }
+                }
+                catch { }
+            }
+        }
+        else
+        {
+            // default device — ask CoreAudio what it actually is, for Bluetooth detection
             try
             {
-                _waveIn = new WaveInEvent
-                {
-                    DeviceNumber = _deviceNumber,
-                    WaveFormat = new WaveFormat(rate, 16, 1),
-                    BufferMilliseconds = 30,
-                    NumberOfBuffers = 4,
-                };
-                _waveIn.DataAvailable += OnData;
-                _waveIn.RecordingStopped += OnStopped;
-                _waveIn.StartRecording();
-                _actualRate = rate;
-                _ring = new float[rate]; // 1 second of pre-roll
-                _ringPos = 0;
-                _ringFilled = 0;
-                _deviceRunning = true;
-                return;
+                using var enumerator = new MMDeviceEnumerator();
+                using var dev = enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Communications);
+                name = dev.FriendlyName;
             }
-            catch (Exception ex)
-            {
-                _waveIn?.Dispose();
-                _waveIn = null;
-                Logger.Log($"mic open at {rate} Hz failed: {ex.Message}");
-            }
+            catch { name = ""; }
         }
-        _deviceRunning = false;
-        Error?.Invoke("Could not open the microphone. Check that one is connected and not blocked by privacy settings.");
+
+        bool isBt = BluetoothMarkers.Any(m => name.Contains(m, StringComparison.OrdinalIgnoreCase));
+        return (index, name, isBt);
     }
 
-    private void CloseDevice()
+    private void TryOpenAndStartLocked()
     {
+        var (index, name, isBt) = ResolveDevice();
+        _isBluetooth = isBt;
+
+        // Bluetooth links can refuse the first open right after waking — try twice
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            foreach (int rate in new[] { 16000, 48000, 44100 })
+            {
+                try
+                {
+                    _waveIn = new WaveInEvent
+                    {
+                        DeviceNumber = index,
+                        WaveFormat = new WaveFormat(rate, 16, 1),
+                        BufferMilliseconds = 30,
+                        NumberOfBuffers = 4,
+                    };
+                    _waveIn.DataAvailable += OnData;
+                    _waveIn.RecordingStopped += OnStopped;
+                    _waveIn.StartRecording();
+                    _actualRate = rate;
+                    _ring = new float[rate];
+                    _ringPos = 0;
+                    _ringFilled = 0;
+                    _deviceRunning = true;
+                    if (_capturing)
+                        _liveResampler = new ChunkResampler(rate, 16000);
+                    Logger.Log($"mic open: \"{name}\" at {rate} Hz{(isBt ? " (bluetooth mode)" : "")}");
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    _waveIn?.Dispose();
+                    _waveIn = null;
+                    Logger.Log($"mic open \"{name}\" at {rate} Hz failed: {ex.Message}");
+                }
+            }
+            if (attempt == 0)
+                Thread.Sleep(350);
+        }
+        _deviceRunning = false;
+        Error?.Invoke("Couldn't open the microphone. Check it's connected (Bluetooth: make sure the AirPods are paired and awake).");
+    }
+
+    private void CloseDeviceLocked()
+    {
+        CancelLingerLocked();
         if (_waveIn != null)
         {
             try { _waveIn.StopRecording(); } catch { }
@@ -157,24 +265,51 @@ public sealed class AudioRecorder : IDisposable
         int n = e.BytesRecorded / 2;
         if (n == 0) return;
 
+        // raw RMS first, so auto-gain can adapt before we scale
+        double sumSqRaw = 0;
+        for (int i = 0; i < n; i++)
+        {
+            short s = (short)(e.Buffer[2 * i] | (e.Buffer[2 * i + 1] << 8));
+            double f = s / 32768.0;
+            sumSqRaw += f * f;
+        }
+        double rmsRaw = Math.Sqrt(sumSqRaw / n);
+
+        // soft auto-gain: only ever boosts (1x..8x), adapts slowly, ignores silence.
+        // Bluetooth hands-free mics often arrive very quiet.
+        if (rmsRaw > 0.004)
+        {
+            double desired = Math.Clamp(0.07 / rmsRaw, 1.0, 8.0);
+            _agcGain += (desired - _agcGain) * 0.08;
+        }
+        double factor = _gain * _agcGain;
+
         var floats = new float[n];
         double sumSq = 0;
         for (int i = 0; i < n; i++)
         {
             short s = (short)(e.Buffer[2 * i] | (e.Buffer[2 * i + 1] << 8));
-            float f = (float)Math.Clamp(s / 32768.0 * _gain, -1.0, 1.0);
+            float f = (float)Math.Clamp(s / 32768.0 * factor, -1.0, 1.0);
             floats[i] = f;
             sumSq += f * f;
         }
 
         bool capturing;
+        bool firstAudio = false;
         ChunkResampler? liveResampler;
         lock (_lock)
         {
             capturing = _capturing;
             liveResampler = _liveResampler;
             if (capturing)
+            {
                 _current.AddRange(floats);
+                if (_firstAudioPending)
+                {
+                    _firstAudioPending = false;
+                    firstAudio = true;
+                }
+            }
             if (_ring.Length > 0)
             {
                 foreach (var f in floats)
@@ -185,6 +320,9 @@ public sealed class AudioRecorder : IDisposable
                 _ringFilled = Math.Min(_ringFilled + n, _ring.Length);
             }
         }
+
+        if (firstAudio)
+            FirstAudio?.Invoke();
 
         if (capturing)
         {
@@ -252,7 +390,7 @@ public sealed class AudioRecorder : IDisposable
 
     public void Dispose()
     {
-        lock (_lock) { CloseDevice(); }
+        lock (_lock) { CloseDeviceLocked(); }
     }
 }
 
@@ -286,7 +424,6 @@ public sealed class ChunkResampler
                 _hasPrev = true;
                 continue;
             }
-            // emit every output sample that falls inside the interval [_prev, s]
             while (_frac < 1.0)
             {
                 output.Add((float)(_prev * (1 - _frac) + s * _frac));

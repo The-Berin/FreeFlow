@@ -573,7 +573,7 @@ public sealed class MainForm : Form
         p.Controls.Add(FieldLabel("Device", 0, y));
         _mic = new ComboBox { Location = new Point(180, y), Width = 320, DropDownStyle = ComboBoxStyle.DropDownList };
         p.Controls.Add(_mic); y += 36;
-        _warm = new CheckBox { Text = "Keep microphone warm (instant start)", Location = new Point(0, y), AutoSize = true };
+        _warm = new CheckBox { Text = "Keep microphone warm (wired mics — Bluetooth is managed automatically)", Location = new Point(0, y), AutoSize = true };
         p.Controls.Add(_warm); y += 28;
         p.Controls.Add(FieldLabel("Input gain (whisper-mode boost)", 0, y));
         _gain = new NumericUpDown { Location = new Point(240, y), Width = 80, Minimum = 0.5m, Maximum = 6m, Increment = 0.25m, DecimalPlaces = 2 };
@@ -832,7 +832,10 @@ public sealed class MainForm : Form
         _mic.Items.Clear();
         foreach (var (idx, name) in AudioRecorder.ListDevices())
             _mic.Items.Add(new MicChoice(idx, name));
-        int micIdx = _mic.Items.Cast<MicChoice>().ToList().FindIndex(m => m.Index == c.MicDevice);
+        int micIdx = string.IsNullOrEmpty(c.MicDeviceName)
+            ? 0
+            : _mic.Items.Cast<MicChoice>().ToList().FindIndex(m =>
+                m.Name.Contains(c.MicDeviceName, StringComparison.OrdinalIgnoreCase));
         _mic.SelectedIndex = Math.Max(0, micIdx);
 
         _liveTyping.Checked = c.LiveTyping;
@@ -909,7 +912,7 @@ public sealed class MainForm : Form
         c.MicGain = (double)_gain.Value;
         c.NumThreads = (int)_threads.Value;
         c.Language = _language.Text.Trim();
-        if (_mic.SelectedItem is MicChoice mc) c.MicDevice = mc.Index;
+        if (_mic.SelectedItem is MicChoice mc) c.MicDeviceName = mc.Index == -1 ? "" : mc.Name;
 
         c.LiveTyping = _liveTyping.Checked;
         c.FinalPass = _finalPass.SelectedIndex switch { 1 => "punct", 2 => "off", _ => "parakeet" };
@@ -967,7 +970,7 @@ public sealed class MainForm : Form
         _statWpm.Text = s.AvgWpm > 0 ? $"{s.AvgWpm:0} wpm" : "—";
         _statCount.Text = s.TotalDictations.ToString("N0");
 
-        bool micOk = _ctx.Recorder.IsWarm || !Cfg.KeepMicWarm;
+        bool micOk = AudioRecorder.AnyDevicePresent;
         string status, sub;
         if (!_ctx.Enabled)
         {
@@ -980,7 +983,9 @@ public sealed class MainForm : Form
             sub = (Cfg.LiveTyping && _ctx.Streaming.IsLoaded
                       ? "Live word-by-word typing is ON. "
                       : "Accurate mode: text lands when you release the key. ")
-                  + (micOk ? "" : "⚠ No microphone detected — plug one in and it'll be picked up automatically.");
+                  + (micOk
+                      ? (_ctx.Recorder.IsBluetoothDevice ? "Bluetooth mic mode: speak after the beep." : "")
+                      : "⚠ No microphone detected — connect one (AirPods count) and it'll be picked up automatically.");
         }
         else
         {
