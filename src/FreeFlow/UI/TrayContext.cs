@@ -543,8 +543,8 @@ public sealed class TrayContext : ApplicationContext
                            || fresh.SwallowHotkey != _cfg.SwallowHotkey;
         bool audioChanged = fresh.MicDeviceName != _cfg.MicDeviceName
                             || fresh.KeepMicWarm != _cfg.KeepMicWarm
-                            || fresh.MicLingerSeconds != _cfg.MicLingerSeconds
-                            || Math.Abs(fresh.MicGain - _cfg.MicGain) > 0.001;
+                            || fresh.MicLingerSeconds != _cfg.MicLingerSeconds;
+        bool gainChanged = Math.Abs(fresh.MicGain - _cfg.MicGain) > 0.001;
 
         _cfg = fresh;
         _cfg.Save();
@@ -556,6 +556,8 @@ public sealed class TrayContext : ApplicationContext
         }
         if (audioChanged)
             _recorder.Configure(_cfg);
+        else if (gainChanged)
+            _recorder.SetGain(_cfg.MicGain); // gain alone never needs a device reopen
         if (modelChanged || !_engine.IsLoaded || !_streaming.IsLoaded)
             LoadEnginesInBackground(firstLoad: false);
 

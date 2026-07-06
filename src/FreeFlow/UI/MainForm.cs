@@ -36,8 +36,17 @@ public sealed class MainForm : Form
     // Settings
     private Button _hotkeyBtn = null!, _cmdHotkeyBtn = null!;
     private CheckBox _tapToLatch = null!, _swallow = null!, _warm = null!, _autostart = null!;
-    private NumericUpDown _tapMs = null!, _gain = null!, _threads = null!;
+    private NumericUpDown _tapMs = null!, _threads = null!;
+    private TrackBar _gain = null!;
+    private Label _gainLabel = null!;
     private ComboBox _mic = null!;
+
+    // mic test zone
+    private ProgressBar _testLevel = null!;
+    private Button _testRecord = null!, _testPlay = null!;
+    private Label _testVerdict = null!;
+    private float[]? _testClip;
+    private bool _testing;
     private TextBox _language = null!;
     private CheckBox _aiEnabled = null!, _aiPolish = null!;
     private TextBox _aiUrl = null!, _aiModel = null!, _aiKey = null!;
@@ -98,6 +107,7 @@ public sealed class MainForm : Form
         _applyDebounce.Tick += (_, _) => { _applyDebounce.Stop(); CommitConfig(); };
 
         _ctx.EngineStateChanged += OnEngineStateChanged;
+        _ctx.Recorder.Level += OnMicLevel;
         FormClosing += (s, e) =>
         {
             // flush any un-debounced or mid-edit changes before the window goes away
@@ -113,7 +123,11 @@ public sealed class MainForm : Form
                 Hide();
             }
         };
-        FormClosed += (_, _) => _ctx.EngineStateChanged -= OnEngineStateChanged;
+        FormClosed += (_, _) =>
+        {
+            _ctx.EngineStateChanged -= OnEngineStateChanged;
+            _ctx.Recorder.Level -= OnMicLevel;
+        };
 
         UseDarkTitleBar();
     }
@@ -581,10 +595,47 @@ public sealed class MainForm : Form
         _mic = new ComboBox { Location = new Point(180, y), Width = 320, DropDownStyle = ComboBoxStyle.DropDownList };
         p.Controls.Add(_mic); y += 36;
         _warm = new CheckBox { Text = "Keep microphone warm (wired mics — Bluetooth is managed automatically)", Location = new Point(0, y), AutoSize = true };
-        p.Controls.Add(_warm); y += 28;
-        p.Controls.Add(FieldLabel("Input gain (whisper-mode boost)", 0, y));
-        _gain = new NumericUpDown { Location = new Point(240, y), Width = 80, Minimum = 0.5m, Maximum = 6m, Increment = 0.25m, DecimalPlaces = 2 };
-        p.Controls.Add(_gain); y += 40;
+        p.Controls.Add(_warm); y += 32;
+
+        p.Controls.Add(FieldLabel("Input gain — boost for quiet or mumbled speech", 0, y)); y += 26;
+        _gain = new TrackBar
+        {
+            Location = new Point(0, y),
+            Width = 320,
+            Minimum = 2,    // 0.5×
+            Maximum = 24,   // 6.0×
+            TickFrequency = 4,
+            SmallChange = 1,
+            LargeChange = 4,
+        };
+        _gainLabel = new Label
+        {
+            Location = new Point(330, y + 8),
+            AutoSize = true,
+            ForeColor = Theme.Accent,
+            Font = new Font("Segoe UI Semibold", 10.5f),
+        };
+        _gain.ValueChanged += (_, _) =>
+        {
+            _gainLabel.Text = $"{_gain.Value / 4.0:0.00}×";
+            if (!_loadingUi)
+                _ctx.Recorder.SetGain(_gain.Value / 4.0); // live, so the test zone hears it instantly
+        };
+        p.Controls.Add(_gain);
+        p.Controls.Add(_gainLabel); y += 56;
+
+        p.Controls.Add(Header("Mic test", y)); y += 36;
+        p.Controls.Add(Note("Record a few seconds at the current gain, hear exactly what the recognizer hears, adjust, repeat.", y)); y += 30;
+        _testLevel = new ProgressBar { Location = new Point(0, y), Size = new Size(320, 14), Maximum = 100 };
+        p.Controls.Add(_testLevel); y += 24;
+        _testRecord = new Button { Text = "●  Record 3s", Size = new Size(112, 30), Location = new Point(0, y) };
+        _testPlay = new Button { Text = "▶  Play back", Size = new Size(112, 30), Location = new Point(120, y), Enabled = false };
+        _testVerdict = new Label { Location = new Point(244, y + 6), AutoSize = true, ForeColor = Theme.SubText, MaximumSize = new Size(380, 0) };
+        _testRecord.Click += (_, _) => RunMicTest();
+        _testPlay.Click += (_, _) => PlayMicTest();
+        p.Controls.Add(_testRecord);
+        p.Controls.Add(_testPlay);
+        p.Controls.Add(_testVerdict); y += 48;
 
         p.Controls.Add(Header("System", y)); y += 38;
         _autostart = new CheckBox { Text = "Start FreeFlow when Windows starts", Location = new Point(0, y), AutoSize = true };
@@ -740,6 +791,110 @@ public sealed class MainForm : Form
 
     #endregion
 
+    #region mic test
+
+    private async void RunMicTest()
+    {
+        if (_testing) return;
+        _testing = true;
+        _testRecord.Enabled = false;
+        _testVerdict.ForeColor = Theme.SubText;
+        _testVerdict.Text = "Recording — talk like you normally would (mumble away).";
+        try
+        {
+            _ctx.Recorder.StartCapture();
+            for (int tenths = 30; tenths >= 1; tenths--)
+            {
+                _testRecord.Text = $"●  {tenths / 10.0:0.0}s";
+                await Task.Delay(100);
+            }
+            var clip = _ctx.Recorder.StopCapture();
+            _testClip = clip;
+            _testPlay.Enabled = clip.Length > 0;
+
+            double sumSq = 0;
+            int clipped = 0;
+            foreach (var s in clip)
+            {
+                sumSq += s * s;
+                if (Math.Abs(s) > 0.985) clipped++;
+            }
+            double rms = clip.Length > 0 ? Math.Sqrt(sumSq / clip.Length) : 0;
+            double clipPct = clip.Length > 0 ? 100.0 * clipped / clip.Length : 0;
+
+            if (clip.Length < 16000)
+            {
+                _testVerdict.ForeColor = Theme.Danger;
+                _testVerdict.Text = "No audio captured. Is the mic connected and selected above?";
+            }
+            else if (clipPct > 0.5)
+            {
+                _testVerdict.ForeColor = Theme.Danger;
+                _testVerdict.Text = $"Clipping ({clipPct:0.0}% of samples) — that DOES hurt accuracy. Lower the gain a notch.";
+            }
+            else if (rms < 0.015)
+            {
+                _testVerdict.ForeColor = Theme.Danger;
+                _testVerdict.Text = "Still very quiet. Raise the gain or get closer to the mic.";
+            }
+            else
+            {
+                _testVerdict.ForeColor = Theme.Ok;
+                _testVerdict.Text = "Good level. Play it back — if you can make out the words, so can the recognizer.";
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Log(ex, "mic test");
+            _testVerdict.ForeColor = Theme.Danger;
+            _testVerdict.Text = "Test failed: " + ex.Message;
+        }
+        finally
+        {
+            _testing = false;
+            _testRecord.Enabled = true;
+            _testRecord.Text = "●  Record 3s";
+            _testLevel.Value = 0;
+        }
+    }
+
+    private void PlayMicTest()
+    {
+        var clip = _testClip;
+        if (clip == null || clip.Length == 0) return;
+        try
+        {
+            var pcm = new byte[clip.Length * 2];
+            for (int i = 0; i < clip.Length; i++)
+            {
+                short s = (short)Math.Clamp(clip[i] * 32767f, short.MinValue, short.MaxValue);
+                pcm[2 * i] = (byte)(s & 0xFF);
+                pcm[2 * i + 1] = (byte)(s >> 8);
+            }
+            var raw = new NAudio.Wave.RawSourceWaveStream(new MemoryStream(pcm), new NAudio.Wave.WaveFormat(16000, 16, 1));
+            var outDev = new NAudio.Wave.WaveOutEvent();
+            outDev.Init(raw);
+            outDev.PlaybackStopped += (_, _) => { outDev.Dispose(); raw.Dispose(); };
+            outDev.Play();
+        }
+        catch (Exception ex)
+        {
+            Logger.Log(ex, "mic test playback");
+        }
+    }
+
+    private void OnMicLevel(float rms)
+    {
+        if (IsDisposed || !Visible || !_testing) return;
+        try
+        {
+            BeginInvoke(() => _testLevel.Value = Math.Min(100, (int)(rms * 300)));
+        }
+        catch { }
+    }
+
+    #endregion
+
     #region hotkey capture
 
     private void CaptureHotkey(bool forCommand)
@@ -831,7 +986,8 @@ public sealed class MainForm : Form
         _tapMs.Value = Math.Clamp(c.TapThresholdMs, 100, 1000);
         _swallow.Checked = c.SwallowHotkey;
         _warm.Checked = c.KeepMicWarm;
-        _gain.Value = (decimal)Math.Clamp(c.MicGain, 0.5, 6);
+        _gain.Value = Math.Clamp((int)Math.Round(c.MicGain * 4), _gain.Minimum, _gain.Maximum);
+        _gainLabel.Text = $"{_gain.Value / 4.0:0.00}×";
         _threads.Value = Math.Clamp(c.NumThreads, 1, Environment.ProcessorCount);
         _language.Text = c.Language;
         _autostart.Checked = Autostart.IsEnabled();
@@ -889,6 +1045,7 @@ public sealed class MainForm : Form
                     case CheckBox cb: cb.CheckedChanged += (_, _) => ScheduleApply(); break;
                     case ComboBox combo: combo.SelectedIndexChanged += (_, _) => ScheduleApply(); break;
                     case NumericUpDown num: num.ValueChanged += (_, _) => ScheduleApply(); break;
+                    case TrackBar track: track.ValueChanged += (_, _) => ScheduleApply(); break;
                     case TextBox tb: tb.TextChanged += (_, _) => ScheduleApply(); break;
                 }
             }
@@ -916,7 +1073,7 @@ public sealed class MainForm : Form
         c.TapThresholdMs = (int)_tapMs.Value;
         c.SwallowHotkey = _swallow.Checked;
         c.KeepMicWarm = _warm.Checked;
-        c.MicGain = (double)_gain.Value;
+        c.MicGain = _gain.Value / 4.0;
         c.NumThreads = (int)_threads.Value;
         c.Language = _language.Text.Trim();
         if (_mic.SelectedItem is MicChoice mc) c.MicDeviceName = mc.Index == -1 ? "" : mc.Name;

@@ -58,6 +58,9 @@ public static class Theme
                 if (l.ForeColor == SystemColors.ControlText || l.ForeColor == Color.Empty)
                     l.ForeColor = Text;
                 break;
+            case TrackBar t:
+                t.BackColor = Back;
+                break;
             case ListBox lb:
                 lb.BackColor = Panel;
                 lb.ForeColor = Text;

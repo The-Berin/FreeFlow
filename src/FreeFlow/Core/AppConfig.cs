@@ -39,7 +39,7 @@ public class AppConfig
     public bool KeepMicWarm { get; set; } = true;
     /// <summary>Seconds the mic stays open after a dictation (Bluetooth / cold mode).</summary>
     public int MicLingerSeconds { get; set; } = 20;
-    public double MicGain { get; set; } = 1.0;
+    public double MicGain { get; set; } = 2.0;
     public bool PlaySounds { get; set; } = true;
 
     // Model

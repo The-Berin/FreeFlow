@@ -54,6 +54,12 @@ public sealed class AudioRecorder : IDisposable
     private static readonly string[] BluetoothMarkers = { "hands-free", "airpod", "headset", "bluetooth" };
 
     public bool IsWarm => _warm && _deviceRunning;
+
+    /// <summary>Live gain update from the settings slider — no device reopen needed.</summary>
+    public void SetGain(double gain)
+    {
+        lock (_lock) { _gain = gain; }
+    }
     public bool IsBluetoothDevice { get { lock (_lock) return _isBluetooth; } }
 
     public static bool AnyDevicePresent => WaveInEvent.DeviceCount > 0;
@@ -292,7 +298,7 @@ public sealed class AudioRecorder : IDisposable
         // Bluetooth hands-free mics often arrive very quiet.
         if (rmsRaw > 0.004)
         {
-            double desired = Math.Clamp(0.07 / rmsRaw, 1.0, 8.0);
+            double desired = Math.Clamp(0.08 / rmsRaw, 1.0, 10.0);
             _agcGain += (desired - _agcGain) * 0.08;
         }
         double factor = _gain * _agcGain;
