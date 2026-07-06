@@ -824,9 +824,9 @@ public sealed class MainForm : Form
         _loadingUi = true;
         var c = Cfg;
 
-        _hotkeyPill.Text = c.HotkeyName;
-        _hotkeyBtn.Text = c.HotkeyName;
-        _cmdHotkeyBtn.Text = c.CommandHotkeyName;
+        _hotkeyPill.Text = Vk.DisplayName(c.HotkeyName);
+        _hotkeyBtn.Text = Vk.DisplayName(c.HotkeyName);
+        _cmdHotkeyBtn.Text = Vk.DisplayName(c.CommandHotkeyName);
         _tapToLatch.Checked = c.TapToLatch;
         _tapMs.Value = Math.Clamp(c.TapThresholdMs, 100, 1000);
         _swallow.Checked = c.SwallowHotkey;

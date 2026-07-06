@@ -206,6 +206,31 @@ public static class Vk
         return $"VK_0x{vk:X2}";
     }
 
+    /// <summary>Human-friendly label for a stored key name ("OemBackslash" → "\").
+    /// Storage names stay raw so they round-trip through FromName; only display changes.</summary>
+    public static string DisplayName(string storedName) => storedName switch
+    {
+        "RightCtrl" => "Right Ctrl",
+        "LeftCtrl" => "Left Ctrl",
+        "RightAlt" => "Right Alt",
+        "RightShift" => "Right Shift",
+        "CapsLock" => "Caps Lock",
+        "ScrollLock" => "Scroll Lock",
+        "OemBackslash" or "OemPipe" or "Oem5" or "Oem102" => "\\",
+        "Oemtilde" or "Oem3" => "`",
+        "OemQuestion" or "Oem2" => "/",
+        "OemSemicolon" or "Oem1" => ";",
+        "OemQuotes" or "Oem7" => "'",
+        "OemOpenBrackets" or "Oem4" => "[",
+        "OemCloseBrackets" or "Oem6" => "]",
+        "OemMinus" => "-",
+        "Oemplus" => "=",
+        "Oemcomma" => ",",
+        "OemPeriod" => ".",
+        var d when d.Length == 2 && d[0] == 'D' && char.IsDigit(d[1]) => d[1..],
+        _ => storedName,
+    };
+
     public static string[] Names => Map.Keys.ToArray();
 
     public static string[] HotkeyChoices => Map.Keys.Where(k => k != "None").ToArray();

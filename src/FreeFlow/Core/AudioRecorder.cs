@@ -405,7 +405,7 @@ public sealed class AudioRecorder : IDisposable
             }
         }
         if (wasCapturing && !recovered)
-            Error?.Invoke("Microphone dropped out — released what was captured so far.");
+            Error?.Invoke("Microphone dropped out. Kept what was captured so far.");
     }
 
     public static float[] Resample(float[] src, int srcRate, int dstRate)

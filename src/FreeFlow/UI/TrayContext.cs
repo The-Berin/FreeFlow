@@ -57,7 +57,7 @@ public sealed class TrayContext : ApplicationContext
         _tray = new NotifyIcon
         {
             Icon = TrayIcons.Loading,
-            Text = "FreeFlow — loading models…",
+            Text = "FreeFlow: loading models…",
             Visible = true,
         };
         _tray.ContextMenuStrip = BuildMenu();
@@ -103,7 +103,7 @@ public sealed class TrayContext : ApplicationContext
 
     private void LoadEnginesInBackground(bool firstLoad)
     {
-        SetTray(TrayIcons.Loading, "FreeFlow — loading models…");
+        SetTray(TrayIcons.Loading, "FreeFlow: loading models…");
         Task.Run(async () =>
         {
             // make sure everything needed exists: live models (72 MB + 7 MB) and the
@@ -115,7 +115,7 @@ public sealed class TrayContext : ApplicationContext
                 {
                     try
                     {
-                        SetTraySafe(TrayIcons.Loading, $"FreeFlow — downloading {m.Id}…");
+                        SetTraySafe(TrayIcons.Loading, $"FreeFlow: downloading {m.Id}…");
                         await ModelDownloader.DownloadAsync(m, null, CancellationToken.None);
                     }
                     catch (Exception ex)
@@ -134,11 +134,11 @@ public sealed class TrayContext : ApplicationContext
                 if (_engine.IsLoaded || _streaming.IsLoaded)
                 {
                     SetTray(_enabled ? TrayIcons.Idle : TrayIcons.Disabled,
-                        $"FreeFlow — hold {_cfg.HotkeyName} to dictate");
+                        $"FreeFlow: hold {Vk.DisplayName(_cfg.HotkeyName)} to dictate");
                 }
                 else
                 {
-                    SetTray(TrayIcons.Disabled, "FreeFlow — no model loaded");
+                    SetTray(TrayIcons.Disabled, "FreeFlow: no model loaded");
                     if (firstLoad)
                         OpenMain();
                 }
@@ -239,7 +239,7 @@ public sealed class TrayContext : ApplicationContext
         _recorder.StartCapture();
         _state = FlowState.Recording;
         _overlay.SetState(OverlayState.Listening);
-        SetTray(TrayIcons.Recording, "FreeFlow — listening");
+        SetTray(TrayIcons.Recording, "FreeFlow: listening");
     }
 
     private void OnPartialFromDecoder(string text)
@@ -268,7 +268,7 @@ public sealed class TrayContext : ApplicationContext
         _state = FlowState.Processing;
         SoundFx.RecordStop(_cfg);
         _overlay.SetState(OverlayState.Processing);
-        SetTray(TrayIcons.Processing, "FreeFlow — processing");
+        SetTray(TrayIcons.Processing, "FreeFlow: processing");
 
         Task.Run(async () =>
         {
@@ -391,7 +391,7 @@ public sealed class TrayContext : ApplicationContext
                 {
                     _narrowbandWarned = true;
                     _tray.ShowBalloonTip(8000, "Bluetooth mic is in phone-quality mode",
-                        "Your adapter negotiated the 8 kHz codec. Dictation still works — accuracy is just a bit lower. " +
+                        "Your adapter negotiated the 8 kHz codec. Dictation still works, accuracy is just a bit lower. " +
                         "Updating the Bluetooth adapter driver sometimes unlocks the 16 kHz wideband codec.",
                         ToolTipIcon.Info);
                 }
@@ -463,7 +463,7 @@ public sealed class TrayContext : ApplicationContext
             if (string.IsNullOrWhiteSpace(rewritten))
             {
                 SoundFx.ErrorTone(_cfg);
-                _overlay.SetState(OverlayState.Error, "AI rewrite failed — see log");
+                _overlay.SetState(OverlayState.Error, "AI rewrite failed (see log)");
                 return;
             }
             TextInjector.PasteText(rewritten);
@@ -484,7 +484,7 @@ public sealed class TrayContext : ApplicationContext
         {
             uiAction();
             _state = FlowState.Idle;
-            SetTray(_enabled ? TrayIcons.Idle : TrayIcons.Disabled, "FreeFlow — ready");
+            SetTray(_enabled ? TrayIcons.Idle : TrayIcons.Disabled, "FreeFlow: ready");
         });
     }
 
@@ -516,7 +516,7 @@ public sealed class TrayContext : ApplicationContext
     {
         _enabled = value;
         SetTray(_enabled ? TrayIcons.Idle : TrayIcons.Disabled,
-            _enabled ? "FreeFlow — ready" : "FreeFlow — disabled");
+            _enabled ? "FreeFlow: ready" : "FreeFlow: disabled");
         EngineStateChanged?.Invoke();
     }
 
