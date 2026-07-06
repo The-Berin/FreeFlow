@@ -71,6 +71,13 @@ public sealed class TrayContext : ApplicationContext
         _recorder.Samples16k += chunk => _streaming.Feed(chunk);
         _recorder.FirstAudio += () => SoundFx.RecordStart(_cfg); // beep once audio actually flows (Bluetooth wake-up)
         _recorder.Error += msg => _overlay.SetState(OverlayState.Error, msg);
+        // Bluetooth died mid-dictation and couldn't come back: stop now and type
+        // what was captured instead of leaving the user talking into a dead mic
+        _recorder.RecoveryFailed += () => _overlay.BeginInvoke(() =>
+        {
+            if (_state is FlowState.Recording or FlowState.RecordingLatched)
+                StopAndProcess();
+        });
         _recorder.Configure(_cfg);
 
         _streaming.Partial += OnPartialFromDecoder;
@@ -282,6 +289,23 @@ public sealed class TrayContext : ApplicationContext
                 {
                     if (wasLive) _liveTyper.Erase();
                     _overlay.SetState(OverlayState.Hidden);
+                });
+                return;
+            }
+
+            // pure silence = the Bluetooth link was up but not delivering audio yet
+            // (AirPods renegotiating). Say so instead of typing nothing confusingly.
+            double rms = 0;
+            for (int i = 0; i < samples.Length; i++) rms += samples[i] * samples[i];
+            rms = Math.Sqrt(rms / samples.Length);
+            if (rms < 0.0015)
+            {
+                Logger.Log($"utterance {audioSec:0.0}s was silence (rms {rms:0.0000}) — likely BT link renegotiating");
+                Finish(() =>
+                {
+                    if (wasLive) _liveTyper.Erase();
+                    SoundFx.ErrorTone(_cfg);
+                    _overlay.SetState(OverlayState.Error, "Mic sent silence. AirPods were reconnecting, try again.");
                 });
                 return;
             }

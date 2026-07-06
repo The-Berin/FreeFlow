@@ -236,6 +236,7 @@ public sealed class AudioRecorder : IDisposable
     {
         var (index, name, isBt) = ResolveDevice();
         _isBluetooth = isBt;
+        int previousRate = _actualRate;
 
         // Bluetooth links can refuse the first open right after waking — try twice
         for (int attempt = 0; attempt < 2; attempt++)
@@ -248,12 +249,16 @@ public sealed class AudioRecorder : IDisposable
                     {
                         DeviceNumber = index,
                         WaveFormat = new WaveFormat(rate, 16, 1),
-                        BufferMilliseconds = 30,
-                        NumberOfBuffers = 4,
+                        BufferMilliseconds = 40,
+                        NumberOfBuffers = 8, // extra slack so BT stutters don't starve the driver
                     };
                     _waveIn.DataAvailable += OnData;
                     _waveIn.RecordingStopped += OnStopped;
                     _waveIn.StartRecording();
+                    // rate changed mid-capture (device reopened differently): convert what
+                    // we already have so the final buffer is a single consistent rate
+                    if (_capturing && rate != previousRate && _current.Count > 0)
+                        _current = new List<float>(Resample(_current.ToArray(), previousRate, rate));
                     _actualRate = rate;
                     _ring = new float[rate];
                     _ringPos = 0;
@@ -407,26 +412,40 @@ public sealed class AudioRecorder : IDisposable
         if (e.Exception == null) return;
         Logger.Log(e.Exception, "recording stopped unexpectedly");
 
-        // Bluetooth links hiccup — if it dies mid-dictation, re-open and keep the
-        // take alive instead of losing everything said so far (Wispr just drops it)
-        bool recovered = false, wasCapturing;
+        // Bluetooth links hiccup — if it dies mid-dictation, re-open and keep the take
+        // alive. AirPods take 1-2s to re-establish the hands-free link, so retry hard.
+        bool wasCapturing;
         lock (_lock)
         {
             _deviceRunning = false;
             wasCapturing = _capturing;
             if (wasCapturing)
-            {
                 CloseDeviceLocked();
-                Thread.Sleep(300);
+        }
+        if (!wasCapturing) return;
+
+        for (int attempt = 0; attempt < 4; attempt++)
+        {
+            Thread.Sleep(attempt == 0 ? 300 : 700);
+            lock (_lock)
+            {
+                if (!_capturing) return; // user released the key meanwhile
                 TryOpenAndStartLocked();
-                recovered = _deviceRunning;
-                if (recovered)
-                    Logger.Log("mic recovered mid-dictation after dropout");
+                if (_deviceRunning)
+                {
+                    Logger.Log($"mic recovered mid-dictation after dropout (attempt {attempt + 1})");
+                    return;
+                }
             }
         }
-        if (wasCapturing && !recovered)
-            Error?.Invoke("Microphone dropped out. Kept what was captured so far.");
+
+        Logger.Log("mic recovery failed after 4 attempts — handing back what was captured");
+        Error?.Invoke("Bluetooth dropped. Inserted what was caught before the cutout.");
+        RecoveryFailed?.Invoke();
     }
+
+    /// <summary>Mid-dictation recovery gave up — the controller should stop and use what was captured.</summary>
+    public event Action? RecoveryFailed;
 
     public static float[] Resample(float[] src, int srcRate, int dstRate)
     {
