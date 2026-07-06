@@ -43,13 +43,17 @@ public sealed class AudioRecorder : IDisposable
     private ChunkResampler? _liveResampler;
 
     // Bluetooth hands-free links sometimes come up half-open: Windows opens the mic
-    // endpoint fine but the SCO voice channel never establishes, so waveIn delivers
-    // exact digital zeros forever. Playing (silence) to the headset's hands-free
-    // RENDER endpoint forces the two-way link up and holds it there.
+    // endpoint fine but the voice channel never truly establishes — the device
+    // delivers a faint dither floor (NOT exact zeros) and none of the real audio.
+    // Playing (silence) to the headset's hands-free RENDER endpoint forces the
+    // two-way link up; a watchdog cycles the device if no real signal arrives,
+    // and after two dead cycles we fall back to the default wired/USB mic.
     private MMDevice? _linkDevice;
     private WasapiOut? _linkOut;
-    private long _zeroRunSamples;
-    private int _zeroKicks;
+    private long _quietRunSamples;
+    private int _deadKicks;
+    private bool _sawRealAudio;
+    private int _forceDeviceIndex = -2; // -2 = none; session-sticky fallback device
 
     // spectral bookkeeping to spot a narrowband (phone-quality) Bluetooth link
     private double _midBandSum, _hiBandSum;
@@ -106,6 +110,7 @@ public sealed class AudioRecorder : IDisposable
             _warm = cfg.KeepMicWarm;
             _gain = cfg.MicGain;
             _deviceName = cfg.MicDeviceName;
+            _forceDeviceIndex = -2; // device settings changed — drop any fallback
             _lingerSeconds = Math.Clamp(cfg.MicLingerSeconds, 3, 120);
             _agcGain = 1.0;
 
@@ -136,8 +141,9 @@ public sealed class AudioRecorder : IDisposable
             _capturing = true;
             _midBandSum = _hiBandSum = 0;
             _bandFrames = 0;
-            _zeroRunSamples = 0;
-            _zeroKicks = 0;
+            _quietRunSamples = 0;
+            _deadKicks = 0;
+            _sawRealAudio = false;
             if (_deviceRunning)
             {
                 _firstAudioPending = false; // already flowing — no wake-up delay to wait out
@@ -205,6 +211,13 @@ public sealed class AudioRecorder : IDisposable
 
     private (int Index, string Name, bool IsBluetooth) ResolveDevice()
     {
+        if (_forceDeviceIndex != -2)
+        {
+            string fallbackName = "";
+            try { fallbackName = WaveInEvent.GetCapabilities(_forceDeviceIndex).ProductName; } catch { }
+            return (_forceDeviceIndex, fallbackName, false);
+        }
+
         string name = _deviceName;
         int index = -1;
 
@@ -250,7 +263,10 @@ public sealed class AudioRecorder : IDisposable
         int previousRate = _actualRate;
 
         if (isBt)
+        {
             OpenLinkHolderLocked(name);
+            EnsureMicVolume(name); // Windows loves parking HFP mic levels at ~37%
+        }
 
         // Bluetooth links can refuse the first open right after waking — try twice
         for (int attempt = 0; attempt < 2; attempt++)
@@ -373,13 +389,24 @@ public sealed class AudioRecorder : IDisposable
         _linkDevice = null;
     }
 
-    /// <summary>Mic is open but delivering pure digital zeros — cycle it to force a live link.</summary>
-    private void KickDeadLink()
+    /// <summary>Mic is open but hearing nothing real — cycle it; on the second strike,
+    /// abandon the Bluetooth mic for the rest of the session and use the default mic.</summary>
+    private void KickDeadLink(bool fallbackToDefault)
     {
-        Logger.Log("mic delivering pure silence — cycling the Bluetooth voice link");
         lock (_lock)
         {
             if (!_capturing) return;
+            if (fallbackToDefault)
+            {
+                int idx = FindFallbackIndexLocked();
+                if (idx != -2)
+                {
+                    _forceDeviceIndex = idx;
+                    Logger.Log("bluetooth mic is up but hearing nothing — switching to the default mic for this session");
+                }
+                else Logger.Log("bluetooth mic hearing nothing and no other mic exists — cycling again");
+            }
+            else Logger.Log("bluetooth mic hearing nothing — cycling the voice link");
             CloseDeviceLocked();
         }
         Thread.Sleep(300);
@@ -387,6 +414,67 @@ public sealed class AudioRecorder : IDisposable
         {
             if (!_capturing) return;
             TryOpenAndStartLocked();
+        }
+    }
+
+    /// <summary>Best non-Bluetooth waveIn device: the system default capture device if
+    /// it has one, otherwise the first wired/USB mic.</summary>
+    private static int FindFallbackIndexLocked()
+    {
+        string def = "";
+        try
+        {
+            using var enumerator = new MMDeviceEnumerator();
+            using var d = enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Console);
+            def = d.FriendlyName;
+        }
+        catch { }
+
+        int firstNonBt = -2;
+        for (int i = 0; i < WaveInEvent.DeviceCount; i++)
+        {
+            string product;
+            try { product = WaveInEvent.GetCapabilities(i).ProductName; } catch { continue; }
+            if (BluetoothMarkers.Any(m => product.Contains(m, StringComparison.OrdinalIgnoreCase)))
+                continue;
+            if (firstNonBt == -2) firstNonBt = i;
+            // waveIn names are truncated to 31 chars, so match by prefix either way
+            if (def.Contains(product, StringComparison.OrdinalIgnoreCase) ||
+                product.Contains(def, StringComparison.OrdinalIgnoreCase))
+                return i;
+        }
+        return firstNonBt;
+    }
+
+    /// <summary>Windows quietly parks Bluetooth hands-free mic levels low (37% observed),
+    /// which buries quiet speech. Pin the endpoint at 100% whenever we open it.</summary>
+    private static void EnsureMicVolume(string micName)
+    {
+        try
+        {
+            using var enumerator = new MMDeviceEnumerator();
+            foreach (var dev in enumerator.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active))
+            {
+                string fn;
+                try { fn = dev.FriendlyName; } catch { dev.Dispose(); continue; }
+                bool match = fn.Contains(micName, StringComparison.OrdinalIgnoreCase) ||
+                             micName.Contains(fn, StringComparison.OrdinalIgnoreCase);
+                if (match)
+                {
+                    var vol = dev.AudioEndpointVolume;
+                    if (vol.Mute) vol.Mute = false;
+                    if (vol.MasterVolumeLevelScalar < 0.99f)
+                    {
+                        Logger.Log($"mic endpoint volume was {vol.MasterVolumeLevelScalar:P0} — raising to 100%");
+                        vol.MasterVolumeLevelScalar = 1f;
+                    }
+                }
+                dev.Dispose();
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Log($"mic volume check failed (non-fatal): {ex.Message}");
         }
     }
 
@@ -405,34 +493,39 @@ public sealed class AudioRecorder : IDisposable
         }
         double rmsRaw = Math.Sqrt(sumSqRaw / n);
 
-        // dead-link watchdog: a healthy mic always has a noise floor; a run of exact
-        // digital zeros means the Bluetooth voice channel is down even though the
-        // endpoint opened. Cycle the device to force a live link.
-        if (rmsRaw <= 0)
+        // dead-link watchdog: a half-open Bluetooth voice link delivers a faint
+        // dither floor (rms ~0.0003) instead of real audio — indistinguishable from
+        // silence but never exactly zero. If a capture starts and no real signal
+        // shows up, cycle the device; if it's still deaf after that, switch to the
+        // default wired/USB mic so dictation keeps working. Once real audio has
+        // been seen the link is proven live and the watchdog disarms (so pauses
+        // mid-sentence never trigger it).
+        if (rmsRaw > 0.0015)
         {
-            bool kick = false;
+            lock (_lock) { _sawRealAudio = true; _quietRunSamples = 0; }
+        }
+        else
+        {
+            bool kick = false, fallback = false;
             lock (_lock)
             {
-                if (_capturing && _isBluetooth)
+                if (_capturing && _isBluetooth && !_sawRealAudio)
                 {
-                    _zeroRunSamples += n;
-                    if (_zeroRunSamples > _actualRate * 3 / 2 && _zeroKicks < 3)
+                    _quietRunSamples += n;
+                    if (_quietRunSamples > _actualRate * 3 / 2 && _deadKicks < 2)
                     {
-                        _zeroRunSamples = 0;
-                        _zeroKicks++;
+                        _quietRunSamples = 0;
+                        _deadKicks++;
                         kick = true;
+                        fallback = _deadKicks >= 2;
                     }
                 }
             }
             if (kick)
             {
-                ThreadPool.QueueUserWorkItem(_ => KickDeadLink());
+                ThreadPool.QueueUserWorkItem(_ => KickDeadLink(fallback));
                 return;
             }
-        }
-        else
-        {
-            lock (_lock) { _zeroRunSamples = 0; }
         }
 
         // soft auto-gain: only ever boosts (1x..8x), adapts slowly, ignores silence.
