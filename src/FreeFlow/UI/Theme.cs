@@ -3,16 +3,17 @@ namespace FreeFlow.UI;
 /// <summary>Shared dark-theme palette and control styling.</summary>
 public static class Theme
 {
-    public static readonly Color Back = Color.FromArgb(24, 24, 30);
-    public static readonly Color Panel = Color.FromArgb(32, 32, 40);
-    public static readonly Color Field = Color.FromArgb(44, 44, 54);
-    public static readonly Color Border = Color.FromArgb(58, 58, 70);
-    public static readonly Color Text = Color.FromArgb(232, 232, 238);
-    public static readonly Color SubText = Color.FromArgb(150, 150, 165);
-    public static readonly Color Accent = Color.FromArgb(124, 92, 255);
-    public static readonly Color AccentSoft = Color.FromArgb(94, 70, 200);
-    public static readonly Color Danger = Color.FromArgb(220, 80, 80);
-    public static readonly Color Ok = Color.FromArgb(80, 200, 120);
+    // palette matched to FreeVoice Studio — the two apps differ only in accent color
+    public static readonly Color Back = Color.FromArgb(14, 14, 19);
+    public static readonly Color Panel = Color.FromArgb(21, 21, 28);
+    public static readonly Color Field = Color.FromArgb(31, 31, 41);
+    public static readonly Color Border = Color.FromArgb(40, 40, 51);
+    public static readonly Color Text = Color.FromArgb(234, 234, 242);
+    public static readonly Color SubText = Color.FromArgb(154, 154, 171);
+    public static readonly Color Accent = Color.FromArgb(109, 74, 255);
+    public static readonly Color AccentSoft = Color.FromArgb(86, 60, 210);
+    public static readonly Color Danger = Color.FromArgb(224, 112, 80);
+    public static readonly Color Ok = Color.FromArgb(79, 200, 128);
 
     public static void Apply(Control root)
     {
