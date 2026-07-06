@@ -60,6 +60,20 @@ public sealed class AudioRecorder : IDisposable
     {
         lock (_lock) { _gain = gain; }
     }
+
+    /// <summary>
+    /// Close the mic link now instead of waiting out the linger. Needed before audio
+    /// playback on Bluetooth headsets: while the hands-free link is open, Windows
+    /// mutes the headset's normal (A2DP) output entirely.
+    /// </summary>
+    public void ReleaseDevice()
+    {
+        lock (_lock)
+        {
+            if (!_capturing)
+                CloseDeviceLocked();
+        }
+    }
     public bool IsBluetoothDevice { get { lock (_lock) return _isBluetooth; } }
 
     public static bool AnyDevicePresent => WaveInEvent.DeviceCount > 0;

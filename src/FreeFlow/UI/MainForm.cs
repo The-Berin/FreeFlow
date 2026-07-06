@@ -858,12 +858,25 @@ public sealed class MainForm : Form
         }
     }
 
-    private void PlayMicTest()
+    private async void PlayMicTest()
     {
         var clip = _testClip;
         if (clip == null || clip.Length == 0) return;
         try
         {
+            // Bluetooth: the lingering mic link mutes the headset's normal output —
+            // release it and give Windows a beat to switch profiles before playing
+            if (_ctx.Recorder.IsBluetoothDevice)
+            {
+                _testPlay.Enabled = false;
+                _testVerdict.ForeColor = Theme.SubText;
+                _testVerdict.Text = "Switching your headset back to playback mode…";
+                _ctx.Recorder.ReleaseDevice();
+                await Task.Delay(1200);
+                _testVerdict.Text = "Playing…";
+                _testPlay.Enabled = true;
+            }
+
             var pcm = new byte[clip.Length * 2];
             for (int i = 0; i < clip.Length; i++)
             {
