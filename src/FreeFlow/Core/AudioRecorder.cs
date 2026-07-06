@@ -42,6 +42,15 @@ public sealed class AudioRecorder : IDisposable
     private List<float> _current = new();
     private ChunkResampler? _liveResampler;
 
+    // Bluetooth hands-free links sometimes come up half-open: Windows opens the mic
+    // endpoint fine but the SCO voice channel never establishes, so waveIn delivers
+    // exact digital zeros forever. Playing (silence) to the headset's hands-free
+    // RENDER endpoint forces the two-way link up and holds it there.
+    private MMDevice? _linkDevice;
+    private WasapiOut? _linkOut;
+    private long _zeroRunSamples;
+    private int _zeroKicks;
+
     // spectral bookkeeping to spot a narrowband (phone-quality) Bluetooth link
     private double _midBandSum, _hiBandSum;
     private int _bandFrames;
@@ -127,6 +136,8 @@ public sealed class AudioRecorder : IDisposable
             _capturing = true;
             _midBandSum = _hiBandSum = 0;
             _bandFrames = 0;
+            _zeroRunSamples = 0;
+            _zeroKicks = 0;
             if (_deviceRunning)
             {
                 _firstAudioPending = false; // already flowing — no wake-up delay to wait out
@@ -238,6 +249,9 @@ public sealed class AudioRecorder : IDisposable
         _isBluetooth = isBt;
         int previousRate = _actualRate;
 
+        if (isBt)
+            OpenLinkHolderLocked(name);
+
         // Bluetooth links can refuse the first open right after waking — try twice
         for (int attempt = 0; attempt < 2; attempt++)
         {
@@ -294,8 +308,86 @@ public sealed class AudioRecorder : IDisposable
             _waveIn.Dispose();
             _waveIn = null;
         }
+        CloseLinkHolderLocked();
         _deviceRunning = false;
         _ringFilled = 0;
+    }
+
+    /// <summary>
+    /// Force the Bluetooth voice (SCO) link up by streaming silence to the headset's
+    /// hands-free render endpoint, and keep it up for the life of the capture device.
+    /// Without this, Windows sometimes opens the mic endpoint successfully while the
+    /// voice channel stays down — the mic delivers pure zeros and dictation "hears"
+    /// nothing. A2DP is muted while this is open, but the mic being open does that anyway.
+    /// </summary>
+    private void OpenLinkHolderLocked(string micName)
+    {
+        if (_linkOut != null) return;
+        try
+        {
+            using var enumerator = new MMDeviceEnumerator();
+            MMDevice? pick = null;
+            int bestScore = -1;
+            foreach (var dev in enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
+            {
+                string fn;
+                try { fn = dev.FriendlyName; } catch { dev.Dispose(); continue; }
+                if (!fn.Contains("Hands-Free", StringComparison.OrdinalIgnoreCase))
+                {
+                    dev.Dispose();
+                    continue;
+                }
+                // prefer the render endpoint belonging to the same headset as the mic
+                int score = fn.Split(' ', '(', ')', '-')
+                              .Count(w => w.Length >= 4 && micName.Contains(w, StringComparison.OrdinalIgnoreCase));
+                if (score > bestScore)
+                {
+                    pick?.Dispose();
+                    pick = dev;
+                    bestScore = score;
+                }
+                else dev.Dispose();
+            }
+            if (pick == null) return;
+
+            _linkDevice = pick;
+            _linkOut = new WasapiOut(pick, AudioClientShareMode.Shared, true, 200);
+            _linkOut.Init(new SilenceProvider(new WaveFormat(16000, 16, 1)));
+            _linkOut.Play();
+            Logger.Log($"voice link held open via \"{pick.FriendlyName}\"");
+            Thread.Sleep(250); // give the SCO link a beat to come up before opening the mic
+        }
+        catch (Exception ex)
+        {
+            Logger.Log($"voice link holder unavailable (non-fatal): {ex.Message}");
+            CloseLinkHolderLocked();
+        }
+    }
+
+    private void CloseLinkHolderLocked()
+    {
+        try { _linkOut?.Stop(); } catch { }
+        try { _linkOut?.Dispose(); } catch { }
+        _linkOut = null;
+        try { _linkDevice?.Dispose(); } catch { }
+        _linkDevice = null;
+    }
+
+    /// <summary>Mic is open but delivering pure digital zeros — cycle it to force a live link.</summary>
+    private void KickDeadLink()
+    {
+        Logger.Log("mic delivering pure silence — cycling the Bluetooth voice link");
+        lock (_lock)
+        {
+            if (!_capturing) return;
+            CloseDeviceLocked();
+        }
+        Thread.Sleep(300);
+        lock (_lock)
+        {
+            if (!_capturing) return;
+            TryOpenAndStartLocked();
+        }
     }
 
     private void OnData(object? sender, WaveInEventArgs e)
@@ -312,6 +404,36 @@ public sealed class AudioRecorder : IDisposable
             sumSqRaw += f * f;
         }
         double rmsRaw = Math.Sqrt(sumSqRaw / n);
+
+        // dead-link watchdog: a healthy mic always has a noise floor; a run of exact
+        // digital zeros means the Bluetooth voice channel is down even though the
+        // endpoint opened. Cycle the device to force a live link.
+        if (rmsRaw <= 0)
+        {
+            bool kick = false;
+            lock (_lock)
+            {
+                if (_capturing && _isBluetooth)
+                {
+                    _zeroRunSamples += n;
+                    if (_zeroRunSamples > _actualRate * 3 / 2 && _zeroKicks < 3)
+                    {
+                        _zeroRunSamples = 0;
+                        _zeroKicks++;
+                        kick = true;
+                    }
+                }
+            }
+            if (kick)
+            {
+                ThreadPool.QueueUserWorkItem(_ => KickDeadLink());
+                return;
+            }
+        }
+        else
+        {
+            lock (_lock) { _zeroRunSamples = 0; }
+        }
 
         // soft auto-gain: only ever boosts (1x..8x), adapts slowly, ignores silence.
         // Bluetooth hands-free mics often arrive very quiet.
@@ -342,7 +464,9 @@ public sealed class AudioRecorder : IDisposable
             if (capturing)
             {
                 _current.AddRange(floats);
-                if (_firstAudioPending)
+                // the ready beep waits for real signal — an all-zeros buffer means the
+                // BT voice link isn't actually delivering audio yet
+                if (_firstAudioPending && rmsRaw > 0)
                 {
                     _firstAudioPending = false;
                     firstAudio = true;
