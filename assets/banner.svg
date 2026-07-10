@@ -1,0 +1,26 @@
+<svg width="1200" height="360" viewBox="0 0 1200 360" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="FreeFlow — free • local • private voice dictation">
+<defs>
+<linearGradient id="freeflow-bg" x1="0" y1="0" x2="1200" y2="360" gradientUnits="userSpaceOnUse">
+<stop offset="0" stop-color="#13131a"/><stop offset="1" stop-color="#1c182c"/></linearGradient>
+<radialGradient id="freeflow-glow" cx="219.5" cy="180.5" r="250" gradientUnits="userSpaceOnUse">
+<stop offset="0" stop-color="#8b5cf6" stop-opacity="0.20"/>
+<stop offset="1" stop-color="#8b5cf6" stop-opacity="0"/></radialGradient>
+<linearGradient id="freeflow-icon" x1="126" y1="87" x2="313" y2="274" gradientUnits="userSpaceOnUse">
+<stop offset="0" stop-color="#986dff"/><stop offset="1" stop-color="#9a48ff"/></linearGradient>
+<linearGradient id="freeflow-sheen" x1="126" y1="87" x2="222" y2="213" gradientUnits="userSpaceOnUse">
+<stop offset="0" stop-color="#ffffff" stop-opacity="0.18"/><stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/></linearGradient>
+<filter id="freeflow-ds" x="-40%" y="-40%" width="180%" height="180%" color-interpolation-filters="sRGB">
+<feDropShadow dx="0" dy="7" stdDeviation="11" flood-color="#000000" flood-opacity="0.33"/></filter>
+<linearGradient id="freeflow-title" x1="371" y1="118" x2="371" y2="190" gradientUnits="userSpaceOnUse">
+<stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#d7d7e2"/></linearGradient>
+</defs>
+<rect width="1200" height="360" fill="url(#freeflow-bg)"/>
+<rect width="1200" height="360" fill="url(#freeflow-glow)"/>
+<g fill="#272434"><rect x="746" y="174" width="36" height="133" rx="18"/><rect x="814" y="102" width="36" height="298" rx="18"/><rect x="882" y="142" width="36" height="196" rx="18"/><rect x="951" y="62" width="36" height="338" rx="18"/><rect x="1019" y="160" width="36" height="160" rx="18"/></g>
+<rect x="126" y="87" width="187" height="187" rx="30" fill="url(#freeflow-icon)" filter="url(#freeflow-ds)"/>
+<rect x="126" y="87" width="187" height="187" rx="30" fill="url(#freeflow-sheen)"/>
+<rect x="126.75" y="87.75" width="185.5" height="185.5" rx="29.25" fill="none" stroke="#ffffff" stroke-opacity="0.12" stroke-width="1.5"/>
+<rect x="170.5" y="163.0" width="11" height="34" rx="5.5" fill="#fff"/><rect x="192.5" y="145.0" width="11" height="70" rx="5.5" fill="#fff"/><rect x="214.5" y="155.0" width="11" height="50" rx="5.5" fill="#fff"/><rect x="236.5" y="134.0" width="11" height="92" rx="5.5" fill="#fff"/><rect x="258.5" y="160.0" width="11" height="40" rx="5.5" fill="#fff"/>
+<text x="371" y="187" font-family="'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif" font-size="88" font-weight="800" letter-spacing="-1" fill="url(#freeflow-title)">FreeFlow</text>
+<text x="366" y="248" font-family="'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif" font-size="30" font-weight="500" fill="#8b8b9a">free • local • private voice dictation</text>
+</svg>
