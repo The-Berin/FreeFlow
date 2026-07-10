@@ -19,6 +19,8 @@ internal static class Program
         }
         if (args.Length >= 2 && args[0] == "--transcribe")
             return SelfTest.TranscribeFile(args[1]);
+        if (args.Length >= 1 && args[0] == "--livetest")
+            return SelfTest.LiveTest(args.Length >= 2 ? args[1] : "");
         if (args.Contains("--pillpreview"))
         {
             ApplicationConfiguration.Initialize();

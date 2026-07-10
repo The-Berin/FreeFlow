@@ -179,6 +179,213 @@ public static class SelfTest
         return 0;
     }
 
+    /// <summary>
+    /// Headless end-to-end dictation test on REAL audio hardware: opens the actual
+    /// recorder (watchdog, AGC, link machinery and all), speaks a test phrase through
+    /// the default output so a loopback/room mic can hear it, streams partials live,
+    /// then runs the accurate final pass — exactly the production dictation path
+    /// minus the hotkey and text injection (covered by --injecttest).
+    /// Usage: FreeFlow.exe --livetest [micDeviceName]
+    /// </summary>
+    public static int LiveTest(string micDeviceName)
+    {
+        if (micDeviceName.Equals("loopback", StringComparison.OrdinalIgnoreCase))
+            return LoopbackLiveTest();
+
+        var report = new StringBuilder();
+        report.AppendLine($"FreeFlow live test — {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+        report.AppendLine($"mic override: \"{micDeviceName}\" (empty = default)");
+
+        var cfg = AppConfig.Load();
+        cfg.MicDeviceName = micDeviceName; // in-memory override only, never saved
+        cfg.KeepMicWarm = false;
+
+        using var streaming = new StreamingEngine();
+        streaming.Load(cfg);
+        using var engine = new SttEngine();
+        engine.Load(cfg);
+        report.AppendLine($"engines: streaming={streaming.IsLoaded} accurate={engine.IsLoaded}");
+
+        var recorder = new AudioRecorder();
+        int partials = 0;
+        string lastPartial = "";
+        streaming.Partial += t => { Interlocked.Increment(ref partials); lastPartial = t; };
+        recorder.Samples16k += c => streaming.Feed(c);
+        recorder.Error += m => report.AppendLine($"RECORDER ERROR: {m}");
+
+        try
+        {
+            recorder.Configure(cfg);
+            if (streaming.IsLoaded) streaming.StartSession();
+            recorder.StartCapture();
+            Thread.Sleep(400); // let the device open before sound starts
+
+            const string phrase = "The quick brown fox jumps over the lazy dog while free flow listens carefully.";
+            using (var synth = new SpeechSynthesizer())
+            {
+                synth.SetOutputToDefaultAudioDevice();
+                synth.Rate = 0;
+                synth.Speak(phrase);
+            }
+            Thread.Sleep(800);
+
+            var samples = recorder.StopCapture();
+            string streamFinal = streaming.IsLoaded ? streaming.FinishSession() : "";
+
+            double rms = 0;
+            for (int i = 0; i < samples.Length; i++) rms += samples[i] * samples[i];
+            rms = samples.Length > 0 ? Math.Sqrt(rms / samples.Length) : 0;
+
+            report.AppendLine($"captured: {samples.Length / 16000.0:0.0}s, rms {rms:0.0000}");
+            report.AppendLine($"streaming: {partials} partials, final \"{lastPartial}\" / \"{streamFinal}\"");
+
+            string final = "";
+            if (engine.IsLoaded && samples.Length > 16000 / 2)
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                final = engine.Transcribe(samples);
+                report.AppendLine($"accurate pass ({sw.ElapsedMilliseconds}ms): \"{final}\"");
+            }
+
+            string norm = new string((final + " " + streamFinal).ToLowerInvariant()
+                .Where(ch => char.IsLetter(ch) || ch == ' ').ToArray());
+            bool pass = norm.Contains("quick brown fox") && norm.Contains("lazy dog");
+            report.AppendLine(pass
+                ? "RESULT: PASS — full pipeline heard and transcribed real audio end to end"
+                : rms < 0.001
+                    ? "RESULT: FAIL — captured silence (no audio path from output to this mic)"
+                    : "RESULT: FAIL — audio captured but transcript wrong");
+            File.WriteAllText(Paths.SelfTestReportPath, report.ToString());
+            return pass ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            report.AppendLine($"EXCEPTION: {ex}");
+            File.WriteAllText(Paths.SelfTestReportPath, report.ToString());
+            return 1;
+        }
+        finally
+        {
+            recorder.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// End-to-end recognition test on LIVE OS audio with no microphone at all:
+    /// speaks a phrase through the default render device while capturing that same
+    /// endpoint via WASAPI loopback, then runs the audio through the streaming and
+    /// accurate engines. Proves the recognition pipeline against real in-flight
+    /// audio even on a machine with zero capture devices.
+    /// Usage: FreeFlow.exe --livetest loopback
+    /// </summary>
+    private static int LoopbackLiveTest()
+    {
+        var report = new StringBuilder();
+        report.AppendLine($"FreeFlow loopback live test — {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+
+        var cfg = AppConfig.Load();
+        using var streaming = new StreamingEngine();
+        streaming.Load(cfg);
+        using var engine = new SttEngine();
+        engine.Load(cfg);
+        report.AppendLine($"engines: streaming={streaming.IsLoaded} accurate={engine.IsLoaded}");
+
+        int partials = 0;
+        string lastPartial = "";
+        streaming.Partial += t => { Interlocked.Increment(ref partials); lastPartial = t; };
+
+        try
+        {
+            var mono = new List<float>();
+            using var cap = new NAudio.Wave.WasapiLoopbackCapture();
+            var fmt = cap.WaveFormat;
+            report.AppendLine($"loopback endpoint format: {fmt.SampleRate} Hz, {fmt.Channels} ch, {fmt.Encoding}");
+
+            cap.DataAvailable += (_, e) =>
+            {
+                int ch = fmt.Channels;
+                if (fmt.Encoding == NAudio.Wave.WaveFormatEncoding.IeeeFloat)
+                {
+                    int frames = e.BytesRecorded / 4 / ch;
+                    for (int i = 0; i < frames; i++)
+                    {
+                        float sum = 0;
+                        for (int c = 0; c < ch; c++)
+                            sum += BitConverter.ToSingle(e.Buffer, (i * ch + c) * 4);
+                        mono.Add(sum / ch);
+                    }
+                }
+                else // 16-bit PCM
+                {
+                    int frames = e.BytesRecorded / 2 / ch;
+                    for (int i = 0; i < frames; i++)
+                    {
+                        float sum = 0;
+                        for (int c = 0; c < ch; c++)
+                            sum += BitConverter.ToInt16(e.Buffer, (i * ch + c) * 2) / 32768f;
+                        mono.Add(sum / ch);
+                    }
+                }
+            };
+
+            cap.StartRecording();
+            Thread.Sleep(300);
+
+            const string phrase = "The quick brown fox jumps over the lazy dog while free flow listens carefully.";
+            using (var synth = new SpeechSynthesizer())
+            {
+                synth.SetOutputToDefaultAudioDevice();
+                synth.Rate = 0;
+                synth.Speak(phrase);
+            }
+            Thread.Sleep(600);
+            cap.StopRecording();
+            Thread.Sleep(200);
+
+            var samples = AudioRecorder.Resample(mono.ToArray(), fmt.SampleRate, 16000);
+            double rms = 0;
+            for (int i = 0; i < samples.Length; i++) rms += samples[i] * samples[i];
+            rms = samples.Length > 0 ? Math.Sqrt(rms / samples.Length) : 0;
+            report.AppendLine($"captured off the wire: {samples.Length / 16000.0:0.0}s, rms {rms:0.0000}");
+
+            // feed the streaming engine exactly like the mic path does (16 kHz chunks)
+            string streamFinal = "";
+            if (streaming.IsLoaded)
+            {
+                streaming.StartSession();
+                for (int off = 0; off < samples.Length; off += 1600)
+                    streaming.Feed(samples.Skip(off).Take(1600).ToArray());
+                streamFinal = streaming.FinishSession();
+                report.AppendLine($"streaming: {partials} partials, final \"{streamFinal}\"");
+            }
+
+            string final = "";
+            if (engine.IsLoaded && samples.Length > 8000)
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                final = engine.Transcribe(samples);
+                report.AppendLine($"accurate pass ({sw.ElapsedMilliseconds}ms): \"{final}\"");
+            }
+
+            string norm = new string((final + " " + streamFinal).ToLowerInvariant()
+                .Where(ch2 => char.IsLetter(ch2) || ch2 == ' ').ToArray());
+            bool pass = norm.Contains("quick brown fox") && norm.Contains("lazy dog");
+            report.AppendLine(pass
+                ? "RESULT: PASS — live OS audio recognized end to end (render → loopback → engines)"
+                : rms < 0.001
+                    ? "RESULT: FAIL — loopback captured silence (render endpoint not mixing?)"
+                    : "RESULT: FAIL — audio captured but transcript wrong");
+            File.WriteAllText(Paths.SelfTestReportPath, report.ToString());
+            return pass ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            report.AppendLine($"EXCEPTION: {ex}");
+            File.WriteAllText(Paths.SelfTestReportPath, report.ToString());
+            return 1;
+        }
+    }
+
     public static int TranscribeFile(string wavPath)
     {
         var cfg = AppConfig.Load();
