@@ -557,9 +557,11 @@ public sealed class AudioRecorder : IDisposable
             if (capturing)
             {
                 _current.AddRange(floats);
-                // the ready beep waits for real signal — an all-zeros buffer means the
-                // BT voice link isn't actually delivering audio yet
-                if (_firstAudioPending && rmsRaw > 0)
+                // the ready beep must never lie: on Bluetooth it waits for genuine signal
+                // above the dead-link dither floor (same bar the watchdog uses), so
+                // beep = link proven live. Wired mics just need any buffer flowing.
+                bool signalIsReal = _isBluetooth ? rmsRaw > 0.0015 : rmsRaw > 0;
+                if (_firstAudioPending && signalIsReal)
                 {
                     _firstAudioPending = false;
                     firstAudio = true;
