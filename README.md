@@ -1,5 +1,3 @@
-<img src="assets/banner.svg" alt="FreeFlow — free • local • private voice dictation" width="100%" />
-
 # FreeFlow
 
 ![FreeFlow](src/FreeFlow/Assets/banner.png)
